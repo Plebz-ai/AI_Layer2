@@ -9,7 +9,7 @@ def get_llm_response(transcript):
     """
     endpoint = "https://finetuned-model-wmoqzjog.eastus2.models.ai.azure.com"
     model_name = "Llama-4-Maverick-17B-128E-Instruct-FP8"
-    api_key = "IPowSTEEbXDdcTtPeO1nvIrQrAeLJfur"
+    api_key = os.getenv("AZURE_API_KEY")
 
     client = ChatCompletionsClient(
         endpoint=endpoint,
