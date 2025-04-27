@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  transcription_service:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./uploads:/app/uploads
+    environment:
+      - FLASK_ENV=development
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+    networks:
+      - default
+    dns:
+      - 8.8.8.8
+
+networks:
+  default:
+    name: shared-network
+    external: true
