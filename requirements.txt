@@ -1,0 +1,10 @@
+flask
+werkzeug
+SpeechRecognition
+requests
+python-dotenv
+redis
+azure-ai-inference
+azure-core
+grpcio
+pydub
