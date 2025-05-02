@@ -17,6 +17,8 @@ services:
       - AZURE_API_KEY=${AZURE_API_KEY}
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - TTS_URL=${TTS_URL}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
     restart: unless-stopped
     depends_on:
       - redis
