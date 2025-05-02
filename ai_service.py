@@ -9,6 +9,7 @@ services to provide a complete conversation experience.
 import logging
 import os
 import base64
+import time
 from STT_Service import SpeechToTextService
 from LLM_Layer import LanguageModelService
 from TTS_Service import TextToSpeechService
@@ -30,30 +31,29 @@ class AIService:
         self.llm_service = LanguageModelService()
         self.tts_service = TextToSpeechService()
         
-        # Validate that all services are properly initialized
+        # Initialize conversation history
+        self.conversation_history = []
+        
+        # Get available voices
+        self.available_voices = self.tts_service.get_available_voices()
+        
         if Config.DEBUG_MODE:
             logger.info("AI Service initialized in DEBUG mode")
+            if self.available_voices:
+                logger.info(f"Found {len(self.available_voices)} available voices")
     
-    def process_audio(self, audio_file_path, character_info=None, conversation_history=None):
-        """
-        Process an audio file through the complete pipeline:
-        1. Convert speech to text
-        2. Generate an LLM response
-        3. Convert response to speech
-        
-        Args:
-            audio_file_path (str): Path to the audio file to process
-            character_info (dict): Optional character information (personality, voice type)
-            conversation_history (list): Optional previous messages for context
-            
-        Returns:
-            dict: A dictionary containing:
-                - transcript: The transcribed user speech
-                - response_text: The LLM-generated text response
-                - audio_data: Binary audio data of the synthesized response
-                - success: Boolean indicating if the process was successful
-                - error: Error message if unsuccessful
-        """
+    def get_voice_id(self, voice_type="neutral"):
+        """Map voice type to ElevenLabs voice ID"""
+        voice_mapping = {
+            "neutral": "21m00Tcm4TlvDq8ikWAM",  # Rachel
+            "friendly": "MF3mGyEYCl7XYWbV9V6O",  # Bella
+            "professional": "AZnzlk1XvdvUeBnXmlld",  # Domi
+            "casual": "ThT5KcBeYPX3keUQqHPh"  # Antoni
+        }
+        return voice_mapping.get(voice_type, "21m00Tcm4TlvDq8ikWAM")
+    
+    def process_audio(self, audio_file_path, character_info=None):
+        """Process audio through the AI pipeline"""
         result = {
             "transcript": None,
             "response_text": None,
@@ -71,22 +71,29 @@ class AIService:
             if not transcript:
                 result["error"] = "Failed to transcribe audio (empty transcript)"
                 return result
-                
+            
+            # Add user message to conversation history
+            self.add_to_history(transcript, sender="user")
+            
             # Step 2: Generate response from LLM
             response_text = self.llm_service.get_response(
                 transcript, 
                 character_info, 
-                conversation_history
+                self.conversation_history
             )
             result["response_text"] = response_text
             
             if not response_text:
                 result["error"] = "Failed to generate response from language model"
                 return result
-                
+            
+            # Add AI message to conversation history
+            self.add_to_history(response_text, sender="AI")
+            
             # Step 3: Convert response to speech
-            voice = character_info.get("voice", "en-US") if character_info else "en-US"
-            audio_data = self.tts_service.convert_text_to_speech(response_text, voice)
+            voice_type = character_info.get("voice_type", "neutral") if character_info else "neutral"
+            voice_id = self.get_voice_id(voice_type)
+            audio_data = self.tts_service.convert_text_to_speech(response_text, voice_id)
             
             # Encode audio data as base64 for API response
             if audio_data:
@@ -154,3 +161,35 @@ class AIService:
         except Exception as e:
             logger.error(f"Error in speech-to-text conversion: {str(e)}")
             return None
+    
+    def clear_conversation_history(self):
+        """Clear the conversation history"""
+        self.conversation_history = []
+        logger.info("Conversation history cleared")
+    
+    def get_conversation_history(self):
+        """Get the current conversation history"""
+        return self.conversation_history
+    
+    def manage_conversation_history(self):
+        """Maintain conversation history size and clean up old messages"""
+        if len(self.conversation_history) > 10:  # Keep last 10 messages
+            self.conversation_history = self.conversation_history[-10:]
+    
+    def add_to_history(self, message, sender="user"):
+        """Add a message to conversation history"""
+        self.conversation_history.append({
+            "sender": sender,
+            "content": message,
+            "timestamp": time.time()
+        })
+        self.manage_conversation_history()
+    
+    def get_character_voices(self):
+        """Get available character voices"""
+        return {
+            "neutral": "Rachel (Natural)",
+            "friendly": "Bella (Friendly)",
+            "professional": "Domi (Professional)",
+            "casual": "Antoni (Casual)"
+        }

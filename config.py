@@ -33,6 +33,10 @@ class Config:
     DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
     STT_URL = os.getenv("STT_URL", "https://api.deepgram.com/v1/listen")
     
+    # ElevenLabs Configuration
+    ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+    ELEVENLABS_API_URL = os.getenv("ELEVENLABS_API_URL", "https://api.elevenlabs.io/v1")
+    
     # Performance and Scaling Settings
     DEFAULT_TIMEOUT = int(os.getenv("DEFAULT_TIMEOUT", "30"))  # Default timeout in seconds
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
@@ -48,6 +52,9 @@ class Config:
         
         if not cls.AZURE_API_KEY:
             missing_vars.append("AZURE_API_KEY")
+            
+        if not cls.ELEVENLABS_API_KEY:
+            missing_vars.append("ELEVENLABS_API_KEY")
             
         if not cls.DEEPGRAM_API_KEY:
             missing_vars.append("DEEPGRAM_API_KEY")
