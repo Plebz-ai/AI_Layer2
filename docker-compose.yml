@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  ai_layer:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - AZURE_LLAMA_ENDPOINT=${AZURE_LLAMA_ENDPOINT}
+      - AZURE_API_KEY=${AZURE_API_KEY}
+      - AZURE_MODEL_NAME=${AZURE_MODEL_NAME}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    depends_on:
+      - redis
+    networks:
+      - ai_network
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    networks:
+      - ai_network
+
+networks:
+  ai_network:
+    driver: bridge 

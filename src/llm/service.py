@@ -5,15 +5,19 @@ from dotenv import load_dotenv
 import json
 import asyncio
 from datetime import datetime
+import aiohttp
 
 load_dotenv()
 
 class LLMService:
     def __init__(self):
-        self.client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        self.default_model = os.getenv("DEFAULT_MODEL", "gpt-4")
-        self.custom_character_model = os.getenv("CUSTOM_CHARACTER_MODEL", "gpt-4")
-        self.prompt_generation_model = os.getenv("PROMPT_GENERATION_MODEL", "gpt-4")
+        # Azure LLama configuration
+        self.azure_endpoint = os.getenv("AZURE_LLAMA_ENDPOINT")
+        self.azure_api_key = os.getenv("AZURE_API_KEY")
+        self.azure_model_name = os.getenv("AZURE_MODEL_NAME", "llama-2-13b-chat")
+        
+        # OpenAI configuration
+        self.openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         
         # Load predefined characters
         self.predefined_characters = self._load_predefined_characters()
@@ -26,13 +30,45 @@ class LLMService:
         except FileNotFoundError:
             return {}
 
+    async def _call_azure_llama(self, messages: List[Dict]) -> str:
+        """Call Azure LLama model."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                headers = {
+                    "Content-Type": "application/json",
+                    "api-key": self.azure_api_key
+                }
+                
+                payload = {
+                    "messages": messages,
+                    "temperature": 0.7,
+                    "max_tokens": 150,
+                    "top_p": 0.95,
+                    "frequency_penalty": 0.3,
+                    "presence_penalty": 0.6
+                }
+                
+                url = f"{self.azure_endpoint}/openai/deployments/{self.azure_model_name}/chat/completions?api-version=2023-05-15"
+                
+                async with session.post(url, headers=headers, json=payload) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        raise Exception(f"Azure LLama API error: {error_text}")
+                    
+                    result = await response.json()
+                    return result["choices"][0]["message"]["content"]
+                    
+        except Exception as e:
+            print(f"Error calling Azure LLama: {str(e)}")
+            raise
+
     async def generate_predefined_response(
         self,
         character_id: str,
         user_message: str,
         conversation_history: List[Dict]
     ) -> str:
-        """Generate response for a predefined character."""
+        """Generate response for a predefined character using Azure LLama."""
         try:
             character = self.predefined_characters.get(character_id)
             if not character:
@@ -45,17 +81,8 @@ class LLMService:
                 {"role": "user", "content": user_message}
             ]
 
-            # Generate response
-            response = await self.client.chat.completions.create(
-                model=self.default_model,
-                messages=messages,
-                temperature=0.7,
-                max_tokens=150,
-                presence_penalty=0.6,
-                frequency_penalty=0.3
-            )
-
-            return response.choices[0].message.content
+            # Generate response using Azure LLama
+            return await self._call_azure_llama(messages)
 
         except Exception as e:
             print(f"Error generating predefined response: {str(e)}")
@@ -69,7 +96,7 @@ class LLMService:
     ) -> str:
         """Generate response for a custom character using two-step LLM process."""
         try:
-            # Step 1: Generate enhanced prompt
+            # Step 1: Generate enhanced prompt using Azure LLama
             prompt_messages = [
                 {"role": "system", "content": "You are a prompt engineering expert."},
                 {"role": "user", "content": f"""
@@ -90,24 +117,17 @@ class LLMService:
                 """}
             ]
 
-            prompt_response = await self.client.chat.completions.create(
-                model=self.prompt_generation_model,
-                messages=prompt_messages,
-                temperature=0.7,
-                max_tokens=500
-            )
+            enhanced_prompt = await self._call_azure_llama(prompt_messages)
 
-            enhanced_prompt = prompt_response.choices[0].message.content
-
-            # Step 2: Generate character response
+            # Step 2: Generate character response using OpenAI
             response_messages = [
                 {"role": "system", "content": enhanced_prompt},
                 *conversation_history[-5:],
                 {"role": "user", "content": user_message}
             ]
 
-            character_response = await self.client.chat.completions.create(
-                model=self.custom_character_model,
+            response = await self.openai_client.chat.completions.create(
+                model="gpt-4",
                 messages=response_messages,
                 temperature=0.7,
                 max_tokens=150,
@@ -115,14 +135,14 @@ class LLMService:
                 frequency_penalty=0.3
             )
 
-            return character_response.choices[0].message.content
+            return response.choices[0].message.content
 
         except Exception as e:
             print(f"Error generating custom character response: {str(e)}")
             raise
 
     async def analyze_emotion(self, text: str) -> Dict:
-        """Analyze emotional content of text."""
+        """Analyze emotional content of text using Azure LLama."""
         try:
             messages = [
                 {"role": "system", "content": "You are an emotion analysis expert."},
@@ -139,14 +159,8 @@ class LLMService:
                 """}
             ]
 
-            response = await self.client.chat.completions.create(
-                model=self.default_model,
-                messages=messages,
-                temperature=0.3,
-                max_tokens=150
-            )
-
-            return json.loads(response.choices[0].message.content)
+            response = await self._call_azure_llama(messages)
+            return json.loads(response)
 
         except Exception as e:
             print(f"Error analyzing emotion: {str(e)}")
