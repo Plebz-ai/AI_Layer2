@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  ai_layer:
+  ai_layer2:
     build: .
     ports:
       - "8000:8000"
@@ -15,8 +15,6 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
-    depends_on:
-      - redis
     networks:
       - ai_network
 
