@@ -5,10 +5,13 @@ import asyncio
 from typing import Dict, List, Optional
 import os
 from dotenv import load_dotenv
+import base64
 
 from speech.service import SpeechService
 from llm.service import LLMService
 from conversation.manager import ConversationManager
+
+from pydantic import BaseModel
 
 load_dotenv()
 
@@ -113,7 +116,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                 
             elif message["type"] == "voice_message":
                 # Convert speech to text
-                text = await speech_service.speech_to_text_stream(
+                text = await speech_service.speech_to_text(
                     message["audio_data"]
                 )
                 
@@ -151,20 +154,19 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                 )
                 
                 # Convert response to speech
-                audio_stream = await speech_service.text_to_speech_stream(
+                audio_data = await speech_service.text_to_speech(
                     response,
-                    message["voice_id"]
+                    message.get("voice_id", "en-US-JennyNeural")
                 )
                 
                 # Send audio response
-                async for audio_chunk in audio_stream:
-                    await manager.send_message(
-                        json.dumps({
-                            "type": "voice_response",
-                            "audio_data": audio_chunk
-                        }),
-                        client_id
-                    )
+                await manager.send_message(
+                    json.dumps({
+                        "type": "voice_response",
+                        "audio_data": base64.b64encode(audio_data).decode('utf-8')
+                    }),
+                    client_id
+                )
                     
     except WebSocketDisconnect:
         manager.disconnect(client_id)
@@ -190,15 +192,56 @@ async def get_characters():
 async def get_voices():
     """Get list of available voices."""
     try:
-        return await speech_service.get_available_voices()
+        return await speech_service.get_available_voices_azure()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# New REST endpoints for HTTP-based AI service integration
+class ChatRequest(BaseModel):
+    character_id: int
+    content: str
+
+class ChatResponse(BaseModel):
+    text: str
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat_endpoint(req: ChatRequest):
+    # Generate chat response (no history)
+    text = await llm_service.generate_predefined_response(
+        str(req.character_id), req.content, []
+    )
+    return ChatResponse(text=text)
+
+class STTRequest(BaseModel):
+    audio_data: str  # base64-encoded audio
+
+class STTResponse(BaseModel):
+    transcript: str
+
+@app.post("/api/speech-to-text", response_model=STTResponse)
+async def stt_endpoint(req: STTRequest):
+    audio_bytes = base64.b64decode(req.audio_data)
+    transcript = await speech_service.speech_to_text(audio_bytes)
+    return STTResponse(transcript=transcript)
+
+class TTSRequest(BaseModel):
+    text: str
+    voice_name: Optional[str] = "en-US-JennyNeural"
+
+class TTSResponse(BaseModel):
+    audio_data: str  # base64-encoded audio
+
+@app.post("/api/text-to-speech", response_model=TTSResponse)
+async def tts_endpoint(req: TTSRequest):
+    audio_bytes = await speech_service.text_to_speech(req.text, req.voice_name)
+    audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
+    return TTSResponse(audio_data=audio_b64)
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", 8000)),
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", 5000)),
         reload=True
     ) 
