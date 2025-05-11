@@ -21,6 +21,15 @@ class LLMService:
         self.azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
         self.azure_openai_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_LLM1", "o4-mini")
         self.azure_openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+        # --- Max tokens config ---
+        self.default_max_tokens = int(os.getenv("AZURE_OPENAI_MAX_TOKENS", "512"))
+        # Character ID mapping (numeric to string)
+        self.character_id_map = {
+            "1": "elon_musk",
+            "2": "sherlock_holmes",
+            "3": "marie_curie"
+            # Add more as needed
+        }
 
         # --- Azure Inference (Llama-4-Maverick) ---
         self.azure_inference_endpoint = os.getenv("AZURE_INFERENCE_ENDPOINT")
@@ -54,7 +63,6 @@ class LLMService:
             characters_path = "src/llm/data/predefined_characters.json"
             if not os.path.exists(characters_path):
                 characters_path = "llm/data/predefined_characters.json"
-                
             with open(characters_path, "r") as f:
                 return json.load(f)
         except FileNotFoundError as e:
@@ -73,9 +81,12 @@ class LLMService:
     async def _call_azure_openai(self, 
                                  messages: List[Dict], 
                                  model_name: str = None,
-                                 temperature: float = 0.7,
-                                 max_tokens: int = 150) -> str:
-        """Call Azure OpenAI (o4-mini) API."""
+                                 temperature: float = 1.0,
+                                 max_tokens: int = None,
+                                 top_p: float = None,
+                                 presence_penalty: float = None,
+                                 frequency_penalty: float = None) -> str:
+        """Call Azure OpenAI (o4-mini) API. Only include parameters if not default or explicitly set."""
         if not self.use_azure_openai:
             raise ValueError("Azure OpenAI not configured")
         try:
@@ -86,23 +97,44 @@ class LLMService:
                     "Content-Type": "application/json",
                     "api-key": self.azure_openai_api_key
                 }
+                if max_tokens is None:
+                    max_tokens = self.default_max_tokens
+                if max_tokens < 128:
+                    logging.warning(f"[AzureOpenAI] max_completion_tokens is very low: {max_tokens}. Forcing to 128.")
+                    max_tokens = 128
                 payload = {
                     "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "top_p": 0.95,
-                    "frequency_penalty": 0.3,
-                    "presence_penalty": 0.6
+                    "max_completion_tokens": max_tokens
                 }
+                if temperature is not None and temperature != 1.0:
+                    payload["temperature"] = temperature
+                if top_p is not None:
+                    payload["top_p"] = top_p
+                elif os.getenv("AZURE_OPENAI_ENABLE_TOP_P", "false").lower() == "true":
+                    payload["top_p"] = 0.95
+                if presence_penalty is not None:
+                    payload["presence_penalty"] = presence_penalty
+                elif os.getenv("AZURE_OPENAI_ENABLE_PRESENCE_PENALTY", "false").lower() == "true":
+                    payload["presence_penalty"] = 0.6
+                if frequency_penalty is not None:
+                    payload["frequency_penalty"] = frequency_penalty
+                elif os.getenv("AZURE_OPENAI_ENABLE_FREQUENCY_PENALTY", "false").lower() == "true":
+                    payload["frequency_penalty"] = 0.3
+                logging.info(f"[AzureOpenAI] Payload: {json.dumps(payload)[:500]}")
                 async with session.post(url, headers=headers, json=payload) as response:
                     if response.status != 200:
                         error_text = await response.text()
                         raise Exception(f"Azure OpenAI API error ({response.status}): {error_text}")
                     result = await response.json()
-                    return result["choices"][0]["message"]["content"]
+                    logging.info(f"[AzureOpenAI] Full response: {json.dumps(result)[:500]}")
+                    content = result["choices"][0]["message"]["content"]
+                    if not content:
+                        logging.warning("[AzureOpenAI] Empty response from Azure OpenAI, using fallback.")
+                        return None
+                    return content
         except Exception as e:
             logging.error(f"Error calling Azure OpenAI: {str(e)}")
-            raise
+            return None
 
     async def _call_azure_inference(self, 
                                     messages: List[Dict], 
@@ -122,8 +154,7 @@ class LLMService:
                 payload = {
                     "messages": messages,
                     "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "top_p": 0.95,
+                    "max_completion_tokens": max_tokens,
                     "frequency_penalty": 0.3,
                     "presence_penalty": 0.6,
                     "model": deployment
@@ -141,12 +172,11 @@ class LLMService:
     async def _call_openai_direct(self, 
                                  messages: List[Dict], 
                                  model: str = "gpt-4-turbo-preview",
-                                 temperature: float = 0.7,
+                                 temperature: float = 1.0,
                                  max_tokens: int = 150) -> str:
         """Call OpenAI API directly (fallback if Azure not available)."""
         if not self.use_openai:
             raise ValueError("OpenAI direct API not configured")
-            
         try:
             response = await self.openai_client.chat.completions.create(
                 model=model,
@@ -156,9 +186,7 @@ class LLMService:
                 presence_penalty=0.6,
                 frequency_penalty=0.3
             )
-            
             return response.choices[0].message.content
-            
         except Exception as e:
             logging.error(f"Error calling OpenAI direct: {str(e)}")
             raise
@@ -171,7 +199,9 @@ class LLMService:
     ) -> str:
         """Generate response for a predefined character using o4-mini."""
         try:
-            character = self.predefined_characters.get(character_id)
+            # Map numeric ID to string key if needed
+            character_key = self.character_id_map.get(str(character_id), character_id)
+            character = self.predefined_characters.get(character_key)
             if not character:
                 logging.warning(f"Character {character_id} not found, using fallback")
                 character = next(iter(self.predefined_characters.values()))
@@ -183,18 +213,33 @@ class LLMService:
                     role = "assistant" if msg.get("sender") == "character" else "user"
                     messages.append({"role": role, "content": msg.get("content", "")})
             messages.append({"role": "user", "content": user_message})
+            response = None
+            # Allow per-character LLM params
+            temp = character.get("temperature", 1.0)
+            top_p = character.get("top_p")
+            presence_penalty = character.get("presence_penalty")
+            frequency_penalty = character.get("frequency_penalty")
             if self.use_azure_openai:
                 try:
-                    return await self._call_azure_openai(messages)
+                    response = await self._call_azure_openai(
+                        messages,
+                        temperature=temp,
+                        max_tokens=self.default_max_tokens,
+                        top_p=top_p,
+                        presence_penalty=presence_penalty,
+                        frequency_penalty=frequency_penalty
+                    )
                 except Exception as e:
                     logging.error(f"Azure OpenAI failed, trying fallback: {str(e)}")
-            if self.use_openai:
+            if not response and self.use_openai:
                 try:
-                    return await self._call_openai_direct(messages)
+                    response = await self._call_openai_direct(messages, max_tokens=self.default_max_tokens)
                 except Exception as e:
                     logging.error(f"OpenAI direct failed: {str(e)}")
-            logging.info("Using mock response generator")
-            return f"This is a mock response to: {user_message}. Character: {character['name']}."
+            if not response:
+                logging.info("Using mock response generator")
+                response = f"This is a mock response to: {user_message}. Character: {character['name']}."
+            return response
         except Exception as e:
             logging.error(f"Error generating predefined response: {str(e)}")
             return f"I'm sorry, I encountered an error. Please try again later."
@@ -302,10 +347,8 @@ Format the prompt to be used with an LLM, focusing on making the character reali
                 Respond in JSON format.
                 """}
             ]
-
-            response = await self._call_azure_openai(messages, self.azure_openai_deployment)
+            response = await self._call_azure_openai(messages, self.azure_openai_deployment, temperature=1.0)
             return json.loads(response)
-
         except Exception as e:
             print(f"Error analyzing emotion: {str(e)}")
             raise 
