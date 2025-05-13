@@ -1,0 +1,62 @@
+version: '3.8'
+services:
+  llm1_service:
+    build:
+      context: .
+      dockerfile: src/llm1_service/Dockerfile
+    ports:
+      - "8001:8001"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+  llm2_service:
+    build:
+      context: .
+      dockerfile: src/llm2_service/Dockerfile
+    ports:
+      - "8002:8002"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+  stt_service:
+    build:
+      context: .
+      dockerfile: src/stt_service/Dockerfile
+    ports:
+      - "8003:8003"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+  tts_service:
+    build:
+      context: .
+      dockerfile: src/tts_service/Dockerfile
+    ports:
+      - "8004:8004"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+  orchestrator:
+    build:
+      context: .
+      dockerfile: src/orchestrator/Dockerfile
+    ports:
+      - "8010:8010"
+    depends_on:
+      - llm1_service
+      - llm2_service
+      - stt_service
+      - tts_service
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M 
