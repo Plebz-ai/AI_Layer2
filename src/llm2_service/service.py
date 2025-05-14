@@ -4,6 +4,7 @@ import os
 import logging
 from openai import AzureOpenAI
 import openai, httpx
+import traceback
 
 print(f"[DEBUG] openai version: {openai.__version__}")
 print(f"[DEBUG] httpx version: {httpx.__version__}")
@@ -25,19 +26,27 @@ client = AzureOpenAI(
     api_key=AZURE_O4MINI_API_KEY,
 )
 
-def generate_response(user_query: str, persona_context: str, rules: dict, model_name: str = None):
-    prompt = f"{persona_context}\nUser: {user_query}\n"
+async def generate_response(user_query: str, persona_context: str, rules: dict = None, model: str = None, session_id: str = None, history: list = None):
+    logging.info(f"[LLM2] generate_response called with session_id={session_id}, user_query={user_query}, persona_context={persona_context}, rules={rules}, history={history}")
+    # Compose prompt using persona_context, rules, and history
+    prompt = f"Persona Context: {persona_context}\n"
+    if rules:
+        prompt += f"Rules: {rules}\n"
+    if history:
+        prompt += f"Chat History: {history}\n"
+    prompt += f"User: {user_query}"
     try:
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": user_query}
             ],
             max_completion_tokens=256,
-            model=model_name or AZURE_O4MINI_DEPLOYMENT
+            temperature=0.7,
+            model=model or AZURE_O4MINI_DEPLOYMENT,
         )
-        result = response.choices[0].message.content
+        reply = response.choices[0].message.content
+        return {"response": reply}
     except Exception as e:
-        logging.error(f"LLM2 Azure o4-mini error: {e}")
-        result = "Fallback response"
-    return result 
+        logging.error(f"[LLM2] OpenAI call failed: {e}\n{traceback.format_exc()}")
+        return {"response": "Sorry, something went wrong.", "error": str(e)} 

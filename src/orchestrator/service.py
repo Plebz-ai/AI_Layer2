@@ -3,6 +3,7 @@
 import httpx
 import asyncio
 import logging
+import json
 
 logger = logging.getLogger("orchestrator")
 
@@ -29,42 +30,43 @@ async def safe_post(client, url, json, fallback=None, retries=2):
         text = str(fallback)
     return DummyResp()
 
-async def orchestrate_interaction(user_input: str, character_details: dict, mode: str, audio_data: str = None):
+async def orchestrate_interaction(user_input: str, character_details: dict, mode: str, audio_data: str = None, session_id: str = None, history: list = None):
     async with httpx.AsyncClient() as client:
         if mode == "chat":
-            # Filter character_details for LLM1: only send 'name' and 'persona'
-            filtered_character_details = {}
-            if 'name' in character_details:
-                filtered_character_details['name'] = character_details['name']
-            # Map 'personality' to 'persona' if present
-            if 'persona' in character_details:
-                filtered_character_details['persona'] = character_details['persona']
-            elif 'personality' in character_details:
-                filtered_character_details['persona'] = character_details['personality']
-            else:
-                filtered_character_details['persona'] = 'friendly'
-            logger.info(f"[AI-Layer2 DEBUG] Calling LLM1: {LLM1_URL} with user_input: {user_input} and character_details: {filtered_character_details}")
-            llm1_resp = await safe_post(client, LLM1_URL, {"user_input": user_input, "character_details": filtered_character_details}, fallback={"context": "fallback-context", "rules": {}})
-            logger.info(f"[AI-Layer2 DEBUG] LLM1 status: {getattr(llm1_resp, 'status_code', None)}, text: {getattr(llm1_resp, 'text', None)}")
-            logger.info(f"[AI-Layer2 DEBUG] LLM1 response: {llm1_resp.json()}")
+            # Validate required fields
+            if not user_input or not character_details:
+                return {"response": "Missing user input or character details.", "audio_data": None, "error": {"orchestrator": "Missing required fields."}}
+            # Send full character_details, session_id, and history to LLM1
+            llm1_payload = {"user_input": user_input, "character_details": character_details}
+            if session_id:
+                llm1_payload["session_id"] = session_id
+            if history:
+                llm1_payload["history"] = history
+            logging.info(f"[AI-Layer2 DEBUG] LLM1 payload: {json.dumps(llm1_payload)}")
+            llm1_resp = await safe_post(client, LLM1_URL, llm1_payload, fallback={"context": "fallback-context", "rules": {}})
             context = llm1_resp.json().get("context", "fallback-context")
             rules = llm1_resp.json().get("rules", {})
             llm1_error = None
             if context == "fallback-context":
                 llm1_error = llm1_resp.json().get("error") or "LLM1 failed to generate context."
+                logging.error(f"[AI-Layer2 ERROR] LLM1 failed. Error: {llm1_error}, Response: {llm1_resp.json()}")
+                return {"response": "Sorry, the character could not generate context. Please try again later.", "audio_data": None, "error": {"llm1": llm1_error}}
             model = "O4-mini" if len(user_input) < 50 else "Llama-4"
-            logger.info(f"[AI-Layer2 DEBUG] Calling LLM2: {LLM2_URL} with user_query: {user_input}, persona_context: {context}, rules: {rules}, model: {model}")
-            llm2_resp = await safe_post(client, LLM2_URL, {"user_query": user_input, "persona_context": context, "rules": rules, "model": model}, fallback={"response": "Sorry, something went wrong."})
-            logger.info(f"[AI-Layer2 DEBUG] LLM2 status: {getattr(llm2_resp, 'status_code', None)}, text: {getattr(llm2_resp, 'text', None)}")
-            logger.info(f"[AI-Layer2 DEBUG] LLM2 response: {llm2_resp.json()}")
+            llm2_payload = {"user_query": user_input, "persona_context": context, "rules": rules, "model": model}
+            if session_id:
+                llm2_payload["session_id"] = session_id
+            if history:
+                llm2_payload["history"] = history
+            logging.info(f"[AI-Layer2 DEBUG] LLM2 payload: {json.dumps(llm2_payload)}")
+            llm2_resp = await safe_post(client, LLM2_URL, llm2_payload, fallback={"response": "Sorry, something went wrong."})
             response = llm2_resp.json().get("response", "Sorry, something went wrong.")
             llm2_error = None
             if response == "Sorry, something went wrong.":
                 llm2_error = llm2_resp.json().get("error") or "LLM2 failed to generate response."
+                logging.error(f"[AI-Layer2 ERROR] LLM2 failed. Error: {llm2_error}, Response: {llm2_resp.json()}")
+                return {"response": "Sorry, the character could not respond. Please try again later.", "audio_data": None, "error": {"llm2": llm2_error}}
             result = {"response": response, "audio_data": None}
-            if llm1_error or llm2_error:
-                result["error"] = {"llm1": llm1_error, "llm2": llm2_error}
-            logger.info(f"[AI-Layer2 DEBUG] Final orchestrator result: {result}")
+            logging.info(f"[AI-Layer2 DEBUG] Final orchestrator result: {result}")
             return result
         elif mode == "voice":
             logger.info(f"[AI-Layer2 DEBUG] Calling STT: {STT_URL} with audio_data present: {audio_data is not None}")

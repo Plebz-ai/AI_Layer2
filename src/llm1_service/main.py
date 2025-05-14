@@ -3,7 +3,7 @@ import os
 load_dotenv()  # Load .env from current working directory (/app in Docker)
 
 # Validate required env vars at startup
-REQUIRED_VARS = ["AZURE_LLAMA_ENDPOINT", "AZURE_LLAMA_API_KEY"]
+REQUIRED_VARS = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY"]
 for var in REQUIRED_VARS:
     if not os.getenv(var):
         import sys
