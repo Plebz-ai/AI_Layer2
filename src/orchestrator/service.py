@@ -70,7 +70,8 @@ async def orchestrate_interaction(user_input: str, character_details: dict, mode
                 llm1_error = llm1_resp.json().get("error") or "LLM1 failed to generate context."
                 logging.error(f"[AI-Layer2 ERROR] LLM1 failed. Error: {llm1_error}, Response: {llm1_resp.json()}")
                 return {"response": "Sorry, the character could not generate context. Please try again later.", "audio_data": None, "error": {"llm1": llm1_error}}
-            model = "O4-mini" if len(user_input) < 50 else "Llama-4"
+            # Always use O4-Mini deployment for response
+            model = os.getenv("AZURE_GPT4O_MINI_DEPLOYMENT", "gpt-4o-mini")
             llm2_payload = {"user_query": user_input, "persona_context": context, "rules": rules, "model": model}
             if session_id:
                 llm2_payload["session_id"] = session_id
@@ -79,6 +80,11 @@ async def orchestrate_interaction(user_input: str, character_details: dict, mode
             logging.info(f"[AI-Layer2 DEBUG] LLM2 payload: {json.dumps(llm2_payload)}")
             llm2_resp = await safe_post(client, LLM2_URL, llm2_payload, fallback={"response": "Sorry, something went wrong."})
             response = llm2_resp.json().get("response", "Sorry, something went wrong.")
+            # Treat empty responses as errors
+            if not response or not response.strip():
+                llm2_error = llm2_resp.json().get("error") or "LLM2 returned empty response."
+                logging.error(f"[AI-Layer2 ERROR] LLM2 returned empty response. {llm2_error}")
+                return {"response": "Sorry, the character could not respond. Please try again later.", "audio_data": None, "error": {"llm2": llm2_error}}
             llm2_error = None
             if response == "Sorry, something went wrong.":
                 llm2_error = llm2_resp.json().get("error") or "LLM2 failed to generate response."
@@ -96,11 +102,16 @@ async def orchestrate_interaction(user_input: str, character_details: dict, mode
             logger.info(f"[AI-Layer2 DEBUG] LLM1 response: {llm1_resp.json()}")
             context = llm1_resp.json().get("context", "fallback-context")
             rules = llm1_resp.json().get("rules", {})
-            model = "O4-mini" if len(transcript) < 50 else "Llama-4"
+            # Always use the configured deployment for Azure OpenAI (avoid unsupported models)
+            model = os.getenv("AZURE_GPT4O_MINI_DEPLOYMENT", "gpt-4o-mini")
             logger.info(f"[AI-Layer2 DEBUG] Calling LLM2: {LLM2_URL} with user_query: {transcript}, persona_context: {context}, rules: {rules}, model: {model}")
             llm2_resp = await safe_post(client, LLM2_URL, {"user_query": transcript, "persona_context": context, "rules": rules, "model": model}, fallback={"response": "Sorry, something went wrong."})
             logger.info(f"[AI-Layer2 DEBUG] LLM2 response: {llm2_resp.json()}")
             response = llm2_resp.json().get("response", "Sorry, something went wrong.")
+            # Treat empty responses as errors in voice mode
+            if not response or not response.strip():
+                logger.error(f"[AI-Layer2 ERROR] LLM2 returned empty response in voice mode.")
+                return {"response": "Sorry, the character could not respond. Please try again later.", "audio_data": None, "error": {"llm2": "LLM2 returned empty response."}}
             tts_voice_type = character_details.get("voice_type", "predefined")
             logger.info(f"[AI-Layer2 DEBUG] Calling TTS: {TTS_URL} with text: {response}, voice_type: {tts_voice_type}")
             tts_resp = await safe_post(client, TTS_URL, {"text": response, "voice_type": tts_voice_type}, fallback={"audio_data": None})

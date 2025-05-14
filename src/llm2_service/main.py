@@ -6,7 +6,7 @@ print(f"[DEBUG] httpx version: {httpx.__version__}")
 load_dotenv()  # Load .env from current working directory (/app in Docker)
 
 # Validate required env vars at startup
-REQUIRED_VARS = ["AZURE_O4MINI_ENDPOINT", "AZURE_O4MINI_API_KEY"]
+REQUIRED_VARS = ["AZURE_GPT4O_MINI_ENDPOINT", "AZURE_GPT4O_MINI_API_KEY"]
 for var in REQUIRED_VARS:
     if not os.getenv(var):
         import sys

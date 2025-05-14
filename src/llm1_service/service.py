@@ -6,60 +6,53 @@ from openai import AsyncAzureOpenAI
 import traceback
 import asyncio
 
-# Environment variables for Azure OpenAI GPT-4.1
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1")
-AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+# Update for gpt-4.1-mini deployment
+GPT41_MINI_ENDPOINT = os.getenv("AZURE_GPT41_MINI_ENDPOINT", "https://ai-anuragpradeepjha5004ai785724618017.openai.azure.com/")
+GPT41_MINI_API_KEY = os.getenv("AZURE_GPT41_MINI_API_KEY")
+GPT41_MINI_DEPLOYMENT = os.getenv("AZURE_GPT41_MINI_DEPLOYMENT", "gpt-4.1-mini")
+GPT41_MINI_API_VERSION = os.getenv("AZURE_GPT41_MINI_API_VERSION", "2024-12-01-preview")
 
 # Validate required env vars
-if not AZURE_OPENAI_ENDPOINT or not isinstance(AZURE_OPENAI_ENDPOINT, str):
-    raise RuntimeError("Missing or invalid AZURE_OPENAI_ENDPOINT environment variable.")
-if not AZURE_OPENAI_API_KEY or not isinstance(AZURE_OPENAI_API_KEY, str):
-    raise RuntimeError("Missing or invalid AZURE_OPENAI_API_KEY environment variable.")
+if not GPT41_MINI_ENDPOINT or not isinstance(GPT41_MINI_ENDPOINT, str):
+    raise RuntimeError("Missing or invalid AZURE_GPT41_MINI_ENDPOINT environment variable.")
+if not GPT41_MINI_API_KEY or not isinstance(GPT41_MINI_API_KEY, str):
+    raise RuntimeError("Missing or invalid AZURE_GPT41_MINI_API_KEY environment variable.")
 
 client = AsyncAzureOpenAI(
-    api_version=AZURE_OPENAI_API_VERSION,
-    azure_endpoint=AZURE_OPENAI_ENDPOINT,
-    api_key=AZURE_OPENAI_API_KEY,
+    api_version=GPT41_MINI_API_VERSION,
+    azure_endpoint=GPT41_MINI_ENDPOINT,
+    api_key=GPT41_MINI_API_KEY,
 )
 
 # Log environment variables at startup (except API key)
-logging.info(f"[LLM1] AZURE_OPENAI_ENDPOINT={AZURE_OPENAI_ENDPOINT}")
-logging.info(f"[LLM1] AZURE_OPENAI_DEPLOYMENT={AZURE_OPENAI_DEPLOYMENT}")
-logging.info(f"[LLM1] AZURE_OPENAI_API_VERSION={AZURE_OPENAI_API_VERSION}")
+logging.info(f"[LLM1] GPT41_MINI_ENDPOINT={GPT41_MINI_ENDPOINT}")
+logging.info(f"[LLM1] GPT41_MINI_DEPLOYMENT={GPT41_MINI_DEPLOYMENT}")
+logging.info(f"[LLM1] GPT41_MINI_API_VERSION={GPT41_MINI_API_VERSION}")
 
-async def generate_context(user_input: str, character_details: dict, session_id: str = None, history: list = None):
+async def generate_context(user_input: str, character_details: dict, session_id: str = None, history: list = None, temperature: float = 0.7, top_p: float = 0.95):
     name = character_details.get("name", "Character")
     persona = character_details.get("persona", character_details.get("personality", "friendly"))
     description = character_details.get("description", "")
     voice_type = character_details.get("voice_type", "")
     avatar_url = character_details.get("avatar_url", "")
     logging.info(f"[LLM1] generate_context called with session_id={session_id}, user_input={user_input}, character_details={character_details}, history={history}")
-    # Compose a detailed prompt using all character fields and history
     prompt = (
-        f"Generate a system prompt for the following AI character.\n"
-        f"Name: {name}\n"
-        f"Persona: {persona}\n"
-        f"Description: {description}\n"
-        f"Voice Type: {voice_type}\n"
-        f"Avatar URL: {avatar_url}\n"
+        f"You are {name}, {persona}. {description}\n"
+        f"Voice: {voice_type}\nAvatar: {avatar_url}\n"
+        f"User: {user_input}"
     )
-    if history:
-        prompt += f"\nChat History: {history}\n"
-    prompt += f"\nUser: {user_input}"
-    logging.info(f"[LLM1] Calling OpenAI with prompt: {prompt}")
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            # Use async API call
             response = await client.chat.completions.create(
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": prompt}
                 ],
                 max_completion_tokens=256,
-                model=AZURE_OPENAI_DEPLOYMENT,
+                temperature=temperature,
+                top_p=top_p,
+                model=GPT41_MINI_DEPLOYMENT,
             )
             logging.info(f"[LLM1] OpenAI API raw response: {response}")
             if not hasattr(response, 'choices') or not response.choices or not hasattr(response.choices[0], 'message'):
@@ -75,8 +68,7 @@ async def generate_context(user_input: str, character_details: dict, session_id:
             return {"context": context, "rules": rules}
         except Exception as e:
             logging.error(f"[LLM1] OpenAI call failed (attempt {attempt+1}/{max_retries}): {e}\n{traceback.format_exc()}")
-            # Check for rate limit error (429)
-            if "429" in str(e) and attempt < max_retries - 1:
+            if ("429" in str(e) or "RateLimitError" in str(e)) and attempt < max_retries - 1:
                 wait_time = 2 ** attempt
                 logging.info(f"[LLM1] Rate limit hit, retrying after {wait_time} seconds...")
                 await asyncio.sleep(wait_time)
