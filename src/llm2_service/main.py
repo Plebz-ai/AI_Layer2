@@ -36,8 +36,8 @@ class LLM2Response(BaseModel):
 @app.post("/generate-response", response_model=LLM2Response)
 async def generate_response_endpoint(req: LLM2Request):
     try:
-        result = generate_response(req.user_query, req.persona_context, req.rules, req.model)
-        return LLM2Response(response=result)
+        result = await generate_response(req.user_query, req.persona_context, req.rules, req.model)
+        return LLM2Response(response=result["response"])
     except Exception as e:
         logger.error(f"LLM2 error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

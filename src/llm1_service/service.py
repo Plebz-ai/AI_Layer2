@@ -4,6 +4,7 @@ import os
 import logging
 from openai import AsyncAzureOpenAI
 import traceback
+import asyncio
 
 # Environment variables for Azure OpenAI GPT-4.1
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
@@ -48,29 +49,36 @@ async def generate_context(user_input: str, character_details: dict, session_id:
         prompt += f"\nChat History: {history}\n"
     prompt += f"\nUser: {user_input}"
     logging.info(f"[LLM1] Calling OpenAI with prompt: {prompt}")
-    try:
-        response = await client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt}
-            ],
-            max_completion_tokens=256,
-            temperature=0.7,
-            model=AZURE_OPENAI_DEPLOYMENT,
-        )
-        logging.info(f"[LLM1] OpenAI API raw response: {response}")
-        if not hasattr(response, 'choices') or not response.choices or not hasattr(response.choices[0], 'message'):
-            logging.error(f"[LLM1] OpenAI API returned unexpected response: {response}")
-            return {"context": "fallback-context", "rules": {}, "error": "OpenAI API returned unexpected response format."}
-        context = response.choices[0].message.content
-        # Example: expand rules for persona, style, forbidden topics, etc.
-        rules = {
-            "persona": persona,
-            "style": character_details.get("style", "default"),
-            "forbidden_topics": character_details.get("forbidden_topics", []),
-            "voice_type": voice_type,
-        }
-        return {"context": context, "rules": rules}
-    except Exception as e:
-        logging.error(f"[LLM1] OpenAI call failed: {e}\n{traceback.format_exc()}")
-        return {"context": "fallback-context", "rules": {}, "error": str(e)} 
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # Use async API call
+            response = await client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_completion_tokens=256,
+                model=AZURE_OPENAI_DEPLOYMENT,
+            )
+            logging.info(f"[LLM1] OpenAI API raw response: {response}")
+            if not hasattr(response, 'choices') or not response.choices or not hasattr(response.choices[0], 'message'):
+                logging.error(f"[LLM1] OpenAI API returned unexpected response: {response}")
+                return {"context": "fallback-context", "rules": {}, "error": "OpenAI API returned unexpected response format."}
+            context = response.choices[0].message.content
+            rules = {
+                "persona": persona,
+                "style": character_details.get("style", "default"),
+                "forbidden_topics": character_details.get("forbidden_topics", []),
+                "voice_type": voice_type,
+            }
+            return {"context": context, "rules": rules}
+        except Exception as e:
+            logging.error(f"[LLM1] OpenAI call failed (attempt {attempt+1}/{max_retries}): {e}\n{traceback.format_exc()}")
+            # Check for rate limit error (429)
+            if "429" in str(e) and attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                logging.info(f"[LLM1] Rate limit hit, retrying after {wait_time} seconds...")
+                await asyncio.sleep(wait_time)
+                continue
+            return {"context": "fallback-context", "rules": {}, "error": str(e)} 

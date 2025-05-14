@@ -4,25 +4,44 @@ import httpx
 import asyncio
 import logging
 import json
+import os
 
 logger = logging.getLogger("orchestrator")
 
-LLM1_URL = "http://localhost:8001/generate-context"
-LLM2_URL = "http://localhost:8002/generate-response"
-STT_URL = "http://localhost:8003/speech-to-text"
-TTS_URL = "http://localhost:8004/text-to-speech"
-TTS_STREAM_URL = "http://localhost:8004/stream-text-to-speech"
-STT_STREAM_URL = "http://localhost:8003/stream-speech-to-text"
+# Use service names for Docker networking or localhost for standalone
+# If running in Docker, use service names, else use localhost
+USE_DOCKER = os.environ.get("USE_DOCKER", "true").lower() in ("true", "1", "yes")
+HOST_PREFIX = "" if USE_DOCKER else "localhost:"
+
+# Service URLs with configurable host
+LLM1_URL = f"http://llm1_service:8001/generate-context" if USE_DOCKER else "http://localhost:8001/generate-context"
+LLM2_URL = f"http://llm2_service:8002/generate-response" if USE_DOCKER else "http://localhost:8002/generate-response"
+STT_URL = f"http://stt_service:8003/speech-to-text" if USE_DOCKER else "http://localhost:8003/speech-to-text"
+TTS_URL = f"http://tts_service:8004/text-to-speech" if USE_DOCKER else "http://localhost:8004/text-to-speech"
+TTS_STREAM_URL = f"http://tts_service:8004/stream-text-to-speech" if USE_DOCKER else "http://localhost:8004/stream-text-to-speech"
+STT_STREAM_URL = f"http://stt_service:8003/stream-speech-to-text" if USE_DOCKER else "http://localhost:8003/stream-speech-to-text"
+
+# Log all URLs at startup
+logger.info(f"[ORCHESTRATOR] Service URLs: LLM1={LLM1_URL}, LLM2={LLM2_URL}, STT={STT_URL}, TTS={TTS_URL}")
 
 async def safe_post(client, url, json, fallback=None, retries=2):
+    logger.info(f"[ORCHESTRATOR] Sending POST request to {url}")
     for attempt in range(retries):
         try:
-            resp = await client.post(url, json=json, timeout=3.0)
+            resp = await client.post(url, json=json, timeout=10.0)  # Increased timeout
+            logger.info(f"[ORCHESTRATOR] Response from {url}: status={resp.status_code}")
             if resp.status_code == 200:
                 return resp
-        except Exception:
-            await asyncio.sleep(0.1)
+            logger.error(f"[ORCHESTRATOR] Non-200 response from {url}: {resp.status_code}, {resp.text}")
+        except Exception as e:
+            logger.error(f"[ORCHESTRATOR] Exception calling {url}: {str(e)}")
+            if attempt < retries - 1:
+                wait_time = 0.5 * (2 ** attempt)  # Exponential backoff
+                logger.info(f"[ORCHESTRATOR] Retrying in {wait_time}s (attempt {attempt+1}/{retries})")
+                await asyncio.sleep(wait_time)
+    
     # Fallback
+    logger.error(f"[ORCHESTRATOR] All retries failed for {url}, using fallback")
     class DummyResp:
         def json(self_inner):
             return fallback or {}
