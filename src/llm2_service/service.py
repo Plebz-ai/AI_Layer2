@@ -5,6 +5,7 @@ import logging
 from openai import AsyncAzureOpenAI
 import openai, httpx
 import traceback
+import random
 
 print(f"[DEBUG] openai version: {openai.__version__}")
 print(f"[DEBUG] httpx version: {httpx.__version__}")
@@ -46,7 +47,7 @@ async def generate_response(user_query: str, persona_context: str, rules: dict =
             messages.append({"role": role, "content": msg.get("content")})
     messages.append({"role": "user", "content": user_query})
     logging.info(f"[LLM2] OpenAI API messages: {messages}")
-    max_retries = 3
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             logging.info(f"[LLM2] Sending to Azure: model={model or GPT4O_MINI_DEPLOYMENT}, messages={messages}")
@@ -103,12 +104,16 @@ async def generate_response(user_query: str, persona_context: str, rules: dict =
             err_str = str(e)
             logging.error(f"[LLM2] OpenAI call failed (attempt {attempt+1}/{max_retries}): {e}\n{traceback.format_exc()}")
             if ("429" in err_str or "RateLimitError" in err_str):
-                wait_time = 2 ** attempt
-                logging.warning(f"[LLM2] Rate limit hit (429). Retrying after {wait_time} seconds... If this persists, consider upgrading your Azure OpenAI quota.")
+                # Exponential backoff with jitter
+                base = 2
+                max_wait = 30
+                wait_time = min(max_wait, base ** attempt + random.uniform(0, 1))
+                logging.warning(f"[LLM2] Rate limit hit (429). Retrying after {wait_time:.2f} seconds... If this persists, consider upgrading your Azure OpenAI quota.")
                 import asyncio
                 await asyncio.sleep(wait_time)
                 if attempt < max_retries - 1:
                     continue
                 else:
+                    logging.error("[LLM2] All retries exhausted due to rate limiting.")
                     return {"response": "Sorry, you are being rate limited by Azure OpenAI. Please wait and try again, or upgrade your quota at https://aka.ms/oai/quotaincrease.", "error": err_str}
             return {"response": "Sorry, something went wrong.", "error": err_str} 

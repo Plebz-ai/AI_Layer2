@@ -5,6 +5,7 @@ import logging
 from openai import AsyncAzureOpenAI
 import traceback
 import asyncio
+import random
 
 # Update for gpt-4.1-mini deployment
 GPT41_MINI_ENDPOINT = os.getenv("AZURE_GPT41_MINI_ENDPOINT", "https://ai-anuragpradeepjha5004ai785724618017.openai.azure.com/")
@@ -41,7 +42,7 @@ async def generate_context(user_input: str, character_details: dict, session_id:
         f"Voice: {voice_type}\nAvatar: {avatar_url}\n"
         f"User: {user_input}"
     )
-    max_retries = 3
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             response = await client.chat.completions.create(
@@ -49,11 +50,15 @@ async def generate_context(user_input: str, character_details: dict, session_id:
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": prompt}
                 ],
-                max_completion_tokens=256,
+                max_completion_tokens=128,  # Lowered for rate limit safety
                 temperature=temperature,
                 top_p=top_p,
                 model=GPT41_MINI_DEPLOYMENT,
             )
+            # Log rate limit headers if present
+            if hasattr(response, 'headers'):
+                rl_headers = {k: v for k, v in response.headers.items() if 'ratelimit' in k.lower()}
+                logging.info(f"[LLM1] Rate limit headers: {rl_headers}")
             logging.info(f"[LLM1] OpenAI API raw response: {response}")
             if not hasattr(response, 'choices') or not response.choices or not hasattr(response.choices[0], 'message'):
                 logging.error(f"[LLM1] OpenAI API returned unexpected response: {response}")
@@ -67,10 +72,24 @@ async def generate_context(user_input: str, character_details: dict, session_id:
             }
             return {"context": context, "rules": rules}
         except Exception as e:
-            logging.error(f"[LLM1] OpenAI call failed (attempt {attempt+1}/{max_retries}): {e}\n{traceback.format_exc()}")
+            # Check for Retry-After header in the exception if available
+            wait_time = None
+            retry_after = None
+            if hasattr(e, 'response') and hasattr(e.response, 'headers'):
+                retry_after = e.response.headers.get('Retry-After')
+                if retry_after:
+                    try:
+                        wait_time = int(retry_after)
+                    except Exception:
+                        pass
             if ("429" in str(e) or "RateLimitError" in str(e)) and attempt < max_retries - 1:
-                wait_time = 2 ** attempt
-                logging.info(f"[LLM1] Rate limit hit, retrying after {wait_time} seconds...")
-                await asyncio.sleep(wait_time)
+                if wait_time is None:
+                    wait_time = 2 ** attempt  # fallback exponential backoff
+                # Add jitter to avoid thundering herd
+                jitter = random.uniform(0, 0.5)
+                total_wait = wait_time + jitter
+                logging.info(f"[LLM1] Rate limit hit, retrying after {total_wait:.2f} seconds (Retry-After: {retry_after})...")
+                await asyncio.sleep(total_wait)
                 continue
+            logging.error(f"[LLM1] OpenAI call failed (attempt {attempt+1}/{max_retries}): {e}\n{traceback.format_exc()}")
             return {"context": "fallback-context", "rules": {}, "error": str(e)} 

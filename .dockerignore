@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
+*.pyo
+*.pyd
 
 # C extensions
 *.so
@@ -84,4 +87,15 @@ Thumbs.db
 
 # Exclude frontend build artifacts
 frontend/node_modules/
-frontend/build/ 
+frontend/build/
+
+# Exclude database files
+*.db
+*.sqlite3
+
+# Exclude uploads and audio samples
+uploads/
+audio_samples/
+
+# Exclude next.js build artifacts
+.next/ 
