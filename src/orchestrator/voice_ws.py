@@ -70,6 +70,8 @@ async def voice_session_ws(websocket: WebSocket):
         max_silence_chunks = 10  # Tune for your chunk size and latency
         tts_playing = False
         tts_cancel_event = None
+        history = []
+        sessions[session_id]["history"] = history
         while True:
             msg = await websocket.receive()
             if msg["type"] == "websocket.disconnect":
@@ -81,7 +83,6 @@ async def voice_session_ws(websocket: WebSocket):
                     speech_detected = is_speech(audio_chunk)
                     # --- BARGE-IN LOGIC ---
                     if tts_playing and speech_detected:
-                        # User is speaking while TTS is playing: barge-in
                         tts_playing = False
                         if tts_cancel_event:
                             tts_cancel_event.set()
@@ -97,15 +98,12 @@ async def voice_session_ws(websocket: WebSocket):
                         if speaking:
                             silence_counter += 1
                             if silence_counter >= max_silence_chunks:
-                                # End of utterance detected
                                 speaking = False
                                 await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": False})
-                                # --- STT HANDOFF ---
                                 audio_bytes = bytes(sessions[session_id]["buffer"])
                                 sessions[session_id]["buffer"] = bytearray()
                                 silence_counter = 0
                                 if audio_bytes:
-                                    # Encode to base64 for STT REST API
                                     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
                                     stt_url = "http://stt_service:8003/speech-to-text"
                                     payload = {"audio_data": audio_b64}
@@ -115,6 +113,8 @@ async def voice_session_ws(websocket: WebSocket):
                                             if resp.status_code == 200:
                                                 transcript = resp.json().get("transcript", "")
                                                 await websocket.send_json({"type": MSG_TYPE_TRANSCRIPT_FINAL, "text": transcript})
+                                                # --- SESSION HISTORY: Add user message ---
+                                                history.append({"sender": "user", "content": transcript})
                                                 # --- LLM2 HANDOFF ---
                                                 llm2_url = "http://llm2_service:8002/generate-response"
                                                 persona_context = sessions[session_id]["llm1_context"]
@@ -123,6 +123,7 @@ async def voice_session_ws(websocket: WebSocket):
                                                     "user_query": transcript,
                                                     "persona_context": persona_context,
                                                     "rules": rules,
+                                                    "history": history,
                                                 }
                                                 try:
                                                     llm2_headers = {"x-internal-api-key": os.getenv("INTERNAL_API_KEY", "changeme-internal-key")}
@@ -130,6 +131,8 @@ async def voice_session_ws(websocket: WebSocket):
                                                     if llm2_resp.status_code == 200:
                                                         llm2_text = llm2_resp.json().get("response", "")
                                                         await websocket.send_json({"type": MSG_TYPE_LLM2_FINAL, "text": llm2_text})
+                                                        # --- SESSION HISTORY: Add AI message ---
+                                                        history.append({"sender": "character", "content": llm2_text})
                                                         # --- TTS HANDOFF ---
                                                         tts_url = "http://tts_service:8004/stream-text-to-speech"
                                                         voice_type = rules.get("voice_type", "predefined")
