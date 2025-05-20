@@ -3,7 +3,7 @@ import os
 import sys
 from fastapi import FastAPI, Request, Response, HTTPException, Header, Depends
 from pydantic import BaseModel
-from service import text_to_speech, stream_text_to_speech
+from service import text_to_speech, stream_text_to_speech, get_voice_config
 from fastapi.responses import StreamingResponse
 import asyncio
 import base64
@@ -42,10 +42,18 @@ async def text_to_speech_endpoint(req: TTSRequest, request: Request):
     if not os.getenv("ELEVENLABS_API_KEY"):
         logger.warning(f"[request_id={request_id}] /text-to-speech called but ELEVENLABS_API_KEY is missing!")
     try:
+        # Validate voice_type/model_id/voice_id
+        try:
+            get_voice_config(req.voice_type)
+        except Exception as e:
+            logger.error(f"[request_id={request_id}] Invalid TTS config: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
         audio_bytes = await text_to_speech(req.text, req.voice_type)
         logger.info(f"[request_id={request_id}] /text-to-speech response: audio bytes length={len(audio_bytes)}")
         audio_data = base64.b64encode(audio_bytes).decode("utf-8")
         return TTSResponse(audio_data=audio_data)
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         logger.error(f"[request_id={request_id}] TTS error: {e}\n{traceback.format_exc()}")
@@ -54,11 +62,18 @@ async def text_to_speech_endpoint(req: TTSRequest, request: Request):
 @app.post("/stream-text-to-speech", dependencies=[Depends(verify_internal_api_key)])
 async def stream_text_to_speech_endpoint(req: TTSRequest):
     try:
+        try:
+            get_voice_config(req.voice_type)
+        except Exception as e:
+            logger.error(f"Invalid TTS config: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
         async def audio_stream():
             async for chunk in stream_text_to_speech(req.text, req.voice_type):
                 yield base64.b64encode(chunk).decode("utf-8")
                 await asyncio.sleep(0.01)
         return StreamingResponse(audio_stream(), media_type="text/plain")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"TTS streaming error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

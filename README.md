@@ -253,5 +253,17 @@ This system enables real-time, low-latency, streaming voice conversations betwee
   - Secure internal APIs with strong keys
   - Tune VAD and silence detection for your use case
 
+### Adding New Voices
+- To add a new voice (e.g., 'robot', 'child'), add new model/voice ID pairs to your `.env` file:
+  - `ELEVENLABS_TTS_MODEL_ID_ROBOT=...`
+  - `ELEVENLABS_VOICE_ID_ROBOT=...`
+- Update the backend `VOICE_CONFIGS` dictionary in `tts_service/service.py` to include the new type.
+- Update the frontend to allow users to select the new voice type (send as `voice_type`).
+- Both model ID and voice ID **must** be set for each voice type, or the backend will return a clear error.
+
+### Voice Type Mapping
+- The backend uses the `voice_type` string from the frontend to look up the correct model/voice ID pair.
+- If the user selects an invalid or misconfigured voice type, the backend returns a 400 error with a clear message.
+
 ---
-For questions or contributions, see the code comments in `src/orchestrator/voice_ws.py` or open an issue. 
+For questions or contributions, see the code comments in `

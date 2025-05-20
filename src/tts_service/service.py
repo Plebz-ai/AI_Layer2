@@ -6,22 +6,43 @@ import httpx
 import asyncio
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-VOICE_IDS = {
-    "male": os.getenv("ELEVENLABS_VOICE_ID_MALE", "VOICE_ID_MALE"),
-    "female": os.getenv("ELEVENLABS_VOICE_ID_FEMALE", "VOICE_ID_FEMALE"),
-    "predefined": os.getenv("ELEVENLABS_VOICE_ID_PREDEFINED", "VOICE_ID_PREDEFINED")
-    # Add more voices as needed, e.g. 'robot', 'child', etc.
+VOICE_CONFIGS = {
+    "male": {
+        "model_id": os.getenv("ELEVENLABS_TTS_MODEL_ID_MALE"),
+        "voice_id": os.getenv("ELEVENLABS_VOICE_ID_MALE"),
+    },
+    "female": {
+        "model_id": os.getenv("ELEVENLABS_TTS_MODEL_ID_FEMALE"),
+        "voice_id": os.getenv("ELEVENLABS_VOICE_ID_FEMALE"),
+    },
+    "predefined": {
+        "model_id": os.getenv("ELEVENLABS_TTS_MODEL_ID_PREDEFINED"),
+        "voice_id": os.getenv("ELEVENLABS_VOICE_ID_PREDEFINED"),
+    },
+    # Add more voices as needed
 }
 
 # Simulate preheating: pool of HTTP clients
 PREHEAT_POOL_SIZE = 3
 preheated_clients = [httpx.AsyncClient() for _ in range(PREHEAT_POOL_SIZE)]
 
+def get_voice_config(voice_type: str):
+    config = VOICE_CONFIGS.get(voice_type)
+    if not config or not config["model_id"] or not config["voice_id"]:
+        raise ValueError(f"Invalid or missing TTS config for voice_type '{voice_type}'")
+    return config
+
 async def text_to_speech(text: str, voice_type: str = "predefined"):
-    voice_id = VOICE_IDS.get(voice_type, VOICE_IDS["predefined"])
+    config = get_voice_config(voice_type)
+    model_id = config["model_id"]
+    voice_id = config["voice_id"]
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     headers = {"xi-api-key": ELEVENLABS_API_KEY}
-    payload = {"text": text, "voice_settings": {"stability": 0.5, "similarity_boost": 0.5}}
+    payload = {
+        "text": text,
+        "model_id": model_id,
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.5}
+    }
     client = preheated_clients[hash(text) % PREHEAT_POOL_SIZE]
     try:
         resp = await client.post(url, json=payload, headers=headers)
@@ -29,7 +50,7 @@ async def text_to_speech(text: str, voice_type: str = "predefined"):
         return resp.content  # Return audio bytes
     except Exception as e:
         import logging
-        logging.error(f"TTS error for voice_type={voice_type}, voice_id={voice_id}: {e}")
+        logging.error(f"TTS error for voice_type={voice_type}, model_id={model_id}, voice_id={voice_id}: {e}")
         # Return a short silent WAV as fallback (1 second of silence, 16kHz mono)
         import wave, io
         buf = io.BytesIO()
@@ -41,7 +62,6 @@ async def text_to_speech(text: str, voice_type: str = "predefined"):
         return buf.getvalue()
 
 async def stream_text_to_speech(text: str, voice_type: str = "predefined"):
-    # ElevenLabs does not support true streaming, so we chunk the result
     audio = await text_to_speech(text, voice_type)
     chunk_size = 1024
     for i in range(0, len(audio), chunk_size):
