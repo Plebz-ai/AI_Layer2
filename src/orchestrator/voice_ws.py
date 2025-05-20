@@ -8,6 +8,7 @@ from typing import Dict, Any
 from speech.vad import is_speech
 import base64
 import httpx
+import os
 
 router = APIRouter()
 logger = logging.getLogger("voice_ws")
@@ -104,7 +105,40 @@ async def voice_session_ws(websocket: WebSocket):
                                             if resp.status_code == 200:
                                                 transcript = resp.json().get("transcript", "")
                                                 await websocket.send_json({"type": MSG_TYPE_TRANSCRIPT_FINAL, "text": transcript})
-                                                # TODO: Handoff to LLM2 next
+                                                # --- LLM2 HANDOFF ---
+                                                llm2_url = "http://llm2_service:8002/generate-response"
+                                                persona_context = sessions[session_id]["llm1_context"]
+                                                rules = sessions[session_id]["character_details"]
+                                                llm2_payload = {
+                                                    "user_query": transcript,
+                                                    "persona_context": persona_context,
+                                                    "rules": rules,
+                                                }
+                                                try:
+                                                    llm2_headers = {"x-internal-api-key": os.getenv("INTERNAL_API_KEY", "changeme-internal-key")}
+                                                    llm2_resp = await client.post(llm2_url, json=llm2_payload, headers=llm2_headers)
+                                                    if llm2_resp.status_code == 200:
+                                                        llm2_text = llm2_resp.json().get("response", "")
+                                                        await websocket.send_json({"type": MSG_TYPE_LLM2_FINAL, "text": llm2_text})
+                                                        # --- TTS HANDOFF ---
+                                                        tts_url = "http://tts_service:8004/stream-text-to-speech"
+                                                        voice_type = rules.get("voice_type", "predefined")
+                                                        tts_payload = {"text": llm2_text, "voice_type": voice_type}
+                                                        try:
+                                                            async with client.stream("POST", tts_url, json=tts_payload, headers=llm2_headers) as tts_resp:
+                                                                if tts_resp.status_code == 200:
+                                                                    async for chunk in tts_resp.aiter_text():
+                                                                        # Each chunk is base64-encoded audio
+                                                                        await websocket.send_json({"type": MSG_TYPE_TTS_CHUNK, "audio": chunk})
+                                                                    await websocket.send_json({"type": MSG_TYPE_TTS_END})
+                                                                else:
+                                                                    await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"TTS error: {tts_resp.text}"})
+                                                        except Exception as e:
+                                                            await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"TTS exception: {e}"})
+                                                    else:
+                                                        await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"LLM2 error: {llm2_resp.text}"})
+                                                except Exception as e:
+                                                    await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"LLM2 exception: {e}"})
                                             else:
                                                 await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"STT error: {resp.text}"})
                                     except Exception as e:
