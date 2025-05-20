@@ -41,6 +41,12 @@ class OrchestratorResponse(BaseModel):
 
 @app.post("/interact", response_model=OrchestratorResponse)
 async def interact(req: OrchestratorRequest, request: Request):
+    """
+    POST /interact
+    - For text chat: send {user_input: str, character_details: dict, mode: "chat"}
+    - For voice: send {audio_data: base64-encoded PCM 16kHz mono, character_details: dict, mode: "voice"}
+    At least one of user_input or audio_data must be provided.
+    """
     request_id = getattr(request.state, 'request_id', 'unknown')
     logger.info(f"[request_id={request_id}] /interact payload: user_input length={len(req.user_input)}, character_details keys={list(req.character_details.keys())}, mode={req.mode}, audio_data length={len(req.audio_data) if req.audio_data else 0}")
     import traceback
@@ -54,9 +60,18 @@ async def interact(req: OrchestratorRequest, request: Request):
         errors.append("mode must be a string")
     if req.audio_data is not None and not isinstance(req.audio_data, str):
         errors.append("audio_data must be a string or null")
+    if (not req.user_input or len(req.user_input.strip()) == 0) and (not req.audio_data or len(req.audio_data.strip()) == 0):
+        errors.append("Either user_input (text) or audio_data (voice) must be provided.")
+    # If mode is voice, check audio_data is valid base64
+    if req.mode == "voice" and req.audio_data:
+        import base64
+        try:
+            base64.b64decode(req.audio_data)
+        except Exception:
+            errors.append("audio_data must be valid base64-encoded PCM bytes for voice mode.")
     if errors:
         logger.error(f"[request_id={request_id}] Validation error(s) in /interact: {errors}")
-        return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": errors})
+        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"detail": errors})
     try:
         result = await orchestrate_interaction(
             user_input=req.user_input,
@@ -123,17 +138,22 @@ async def log_requests(request: Request, call_next):
 
 @app.post("/stream-speech-to-text")
 async def stream_speech_to_text(request: Request):
+    """
+    POST /stream-speech-to-text
+    - Expects raw PCM 16kHz mono audio stream in the request body (not JSON, not base64).
+    - Proxies the stream to the STT service and streams back the transcript.
+    - For real-time/streaming voice, use the WebSocket endpoint instead.
+    """
     request_id = getattr(request.state, 'request_id', 'unknown')
     logger.info(f"[request_id={request_id}] /stream-speech-to-text called")
     stt_url = "http://stt_service:8003/stream-speech-to-text"
     start = time.time()
+    INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "changeme-internal-key")
     async with httpx.AsyncClient(timeout=None) as client:
         try:
-            def gen():
-                return request.stream()
-            # Stream request body to STT service
             async def proxy():
-                async with client.stream("POST", stt_url, content=request.stream()) as resp:
+                headers = {"x-internal-api-key": INTERNAL_API_KEY}
+                async with client.stream("POST", stt_url, content=request.stream(), headers=headers) as resp:
                     async for chunk in resp.aiter_bytes():
                         yield chunk
             response = StreamingResponse(proxy(), media_type="text/plain")
