@@ -22,6 +22,14 @@ if not os.getenv("ELEVENLABS_API_KEY"):
     sys.exit(1)
 
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "changeme-internal-key")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+if not ELEVENLABS_API_KEY:
+    print("[TTS_SERVICE] WARNING: ELEVENLABS_API_KEY not set!", flush=True)
+
+TTS_ONLY = os.getenv("TTS_ONLY", "0") == "1"
+VAD_STT_ONLY = os.getenv("VAD_STT_ONLY", "0") == "1"
+LLM_ONLY = os.getenv("LLM_ONLY", "0") == "1"
+print(f"[TTS_SERVICE] TTS_ONLY={TTS_ONLY}, VAD_STT_ONLY={VAD_STT_ONLY}, LLM_ONLY={LLM_ONLY}", flush=True)
 
 class TTSRequest(BaseModel):
     text: str

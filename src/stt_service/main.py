@@ -21,6 +21,14 @@ if not os.getenv("DEEPGRAM_API_KEY"):
     sys.exit(1)
 
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "changeme-internal-key")
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+if not DEEPGRAM_API_KEY:
+    print("[STT_SERVICE] WARNING: DEEPGRAM_API_KEY not set!", flush=True)
+
+TTS_ONLY = os.getenv("TTS_ONLY", "0") == "1"
+VAD_STT_ONLY = os.getenv("VAD_STT_ONLY", "0") == "1"
+LLM_ONLY = os.getenv("LLM_ONLY", "0") == "1"
+print(f"[STT_SERVICE] TTS_ONLY={TTS_ONLY}, VAD_STT_ONLY={VAD_STT_ONLY}, LLM_ONLY={LLM_ONLY}", flush=True)
 
 class STTRequest(BaseModel):
     audio_data: str  # base64-encoded audio

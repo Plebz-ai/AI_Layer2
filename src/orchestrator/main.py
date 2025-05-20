@@ -61,6 +61,18 @@ class OrchestratorResponse(BaseModel):
     response: str
     audio_data: Optional[str] = None
 
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+if not DEEPGRAM_API_KEY:
+    print("[ORCHESTRATOR] WARNING: DEEPGRAM_API_KEY not set!", flush=True)
+if not ELEVENLABS_API_KEY:
+    print("[ORCHESTRATOR] WARNING: ELEVENLABS_API_KEY not set!", flush=True)
+
+TTS_ONLY = os.getenv("TTS_ONLY", "0") == "1"
+VAD_STT_ONLY = os.getenv("VAD_STT_ONLY", "0") == "1"
+LLM_ONLY = os.getenv("LLM_ONLY", "0") == "1"
+print(f"[ORCHESTRATOR] TTS_ONLY={TTS_ONLY}, VAD_STT_ONLY={VAD_STT_ONLY}, LLM_ONLY={LLM_ONLY}", flush=True)
+
 @app.post("/interact", response_model=OrchestratorResponse)
 async def interact(req: OrchestratorRequest, request: Request):
     """
