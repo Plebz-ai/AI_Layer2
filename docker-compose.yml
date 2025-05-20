@@ -59,8 +59,8 @@ services:
     restart: unless-stopped
   orchestrator:
     build:
-      context: ./src/orchestrator
-      dockerfile: Dockerfile
+      context: ./src
+      dockerfile: orchestrator/Dockerfile
     ports:
       - "8010:8010"
     depends_on:
