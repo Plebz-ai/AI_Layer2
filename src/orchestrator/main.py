@@ -214,4 +214,16 @@ async def stream_text_to_speech(request: Request):
 async def ws_health(websocket: WebSocket):
     await websocket.accept()
     await websocket.send_text("ok")
-    await websocket.close() 
+    await websocket.close()
+
+@app.websocket("/ws/echo")
+async def ws_echo(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            await websocket.send_bytes(data)
+    except Exception as e:
+        print(f"[WS ECHO] Connection closed or error: {e}")
+    finally:
+        await websocket.close() 

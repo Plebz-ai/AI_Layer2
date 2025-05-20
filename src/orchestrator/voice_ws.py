@@ -10,6 +10,7 @@ import asyncio
 from utils.redis_session import get_session, set_session, delete_session
 from speech.vad import is_speech
 import sys
+import numpy as np
 
 router = APIRouter()
 logger = logging.getLogger("voice_ws")
@@ -36,6 +37,10 @@ INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "changeme-internal-key")
 
 print("[STARTUP] voice_ws.py loaded", file=sys.stderr)
 
+# Add buffer dump state
+DUMP_LIMIT = 5
+received_buffers = {}
+
 @router.websocket("/ws/voice-session")
 async def voice_session_ws(websocket: WebSocket):
     await websocket.accept()
@@ -51,6 +56,8 @@ async def voice_session_ws(websocket: WebSocket):
         "tts_playing": False,
     }
     await set_session(session_id, {**session_data, "buffer": ""})
+    # Track how many buffers we've dumped for this session
+    received_buffers[session_id] = 0
     try:
         # 1. Wait for INIT message with character details
         init_msg = await websocket.receive_text()
@@ -96,12 +103,23 @@ async def voice_session_ws(websocket: WebSocket):
                 if msg["type"] == "websocket.receive":
                     if "bytes" in msg:
                         audio_chunk = msg["bytes"]
+                        # Dump first DUMP_LIMIT buffers to disk for inspection
+                        if received_buffers[session_id] < DUMP_LIMIT:
+                            dump_path = f"/tmp/audio_dump_{session_id}_{received_buffers[session_id]}.raw"
+                            with open(dump_path, "wb") as f:
+                                f.write(audio_chunk)
+                            logger.info(f"[WS {session_id}] Dumped audio buffer to {dump_path} (len={len(audio_chunk)})")
+                            received_buffers[session_id] += 1
+                        # Log RMS and VAD decision
+                        pcm = np.frombuffer(audio_chunk, dtype=np.int16)
+                        rms = np.sqrt(np.mean(pcm.astype(np.float32) ** 2)) if pcm.size > 0 else 0
                         try:
                             speech_detected = is_speech(audio_chunk)
                         except Exception as e:
                             logger.error(f"[WS {session_id}] VAD error: {e}")
                             await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"VAD error: {e}"})
                             continue
+                        logger.info(f"[WS {session_id}] Audio frame: len={len(audio_chunk)}, RMS={rms:.2f}, speech_detected={speech_detected}")
                         # --- BARGE-IN LOGIC ---
                         if tts_playing and speech_detected:
                             tts_playing = False
