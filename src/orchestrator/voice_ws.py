@@ -35,6 +35,8 @@ LLM2_URL = os.getenv("LLM2_URL", "http://llm2_service:8002/generate-response")
 TTS_STREAM_URL = os.getenv("TTS_STREAM_URL", "http://tts_service:8004/stream-text-to-speech")
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "changeme-internal-key")
 
+VAD_STT_ONLY = os.getenv("VAD_STT_ONLY", "0") == "1"
+
 print("[STARTUP] voice_ws.py loaded", file=sys.stderr)
 
 # Add buffer dump state
@@ -157,6 +159,12 @@ async def voice_session_ws(websocket: WebSocket):
                                                 session["history"] = history
                                                 await set_session(session_id, session)
                                                 # --- LLM2 HANDOFF ---
+                                                if VAD_STT_ONLY:
+                                                    logger.info(f"[WS {session_id}] VAD_STT_ONLY=1: Skipping LLM and TTS. Transcript: {transcript}")
+                                                    await websocket.send_json({"type": MSG_TYPE_LLM2_FINAL, "text": "[VAD_STT_ONLY] Transcript received. LLM/TTS skipped."})
+                                                    audio_buffer = bytearray()
+                                                    await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": False})
+                                                    continue
                                                 persona_context = session["llm1_context"]
                                                 rules = session["character_details"]
                                                 llm2_payload = {
