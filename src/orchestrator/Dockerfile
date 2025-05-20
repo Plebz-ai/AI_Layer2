@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 # Copy only requirements first for better cache
 COPY requirements-base.txt ./
 COPY requirements.txt ./
-# Install Python dependencies (no torch/torchaudio needed)
+# Install Python dependencies (uvicorn[standard] now in requirements.txt)
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements-base.txt && \
     pip install --no-cache-dir -r requirements.txt
