@@ -36,6 +36,8 @@ TTS_STREAM_URL = os.getenv("TTS_STREAM_URL", "http://tts_service:8004/stream-tex
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "changeme-internal-key")
 
 VAD_STT_ONLY = os.getenv("VAD_STT_ONLY", "0") == "1"
+TTS_ONLY = os.getenv("TTS_ONLY", "0") == "1"
+LLM_ONLY = os.getenv("LLM_ONLY", "0") == "1"
 
 print("[STARTUP] voice_ws.py loaded", file=sys.stderr)
 
@@ -185,7 +187,40 @@ async def voice_session_ws(websocket: WebSocket):
                                                         history.append({"sender": "character", "content": llm2_text})
                                                         session["history"] = history
                                                         await set_session(session_id, session)
+                                                        if LLM_ONLY:
+                                                            logger.info(f"[WS {session_id}] LLM_ONLY=1: Skipping TTS. LLM2 response sent to frontend.")
+                                                            audio_buffer = bytearray()
+                                                            await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": False})
+                                                            continue
                                                         # --- TTS HANDOFF ---
+                                                        if TTS_ONLY:
+                                                            logger.info(f"[WS {session_id}] TTS_ONLY=1: Skipping normal LLM2 response, sending static text to TTS.")
+                                                            tts_payload = {"text": "This is a TTS-only test message.", "voice_type": rules.get("voice_type", "predefined")}
+                                                            try:
+                                                                tts_cancel_event = asyncio.Event()
+                                                                tts_playing = True
+                                                                async with client.stream("POST", TTS_STREAM_URL, json=tts_payload, headers={"x-internal-api-key": INTERNAL_API_KEY}, timeout=30) as tts_resp:
+                                                                    if tts_resp.status_code == 200:
+                                                                        async for chunk in tts_resp.aiter_text():
+                                                                            if tts_cancel_event.is_set():
+                                                                                logger.info(f"[WS {session_id}] TTS stream cancelled by barge-in.")
+                                                                                break
+                                                                            await websocket.send_json({"type": MSG_TYPE_TTS_CHUNK, "audio": chunk})
+                                                                        await websocket.send_json({"type": MSG_TYPE_TTS_END})
+                                                                    else:
+                                                                        logger.error(f"[WS {session_id}] TTS error: {tts_resp.text}")
+                                                                        await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"TTS error: {tts_resp.text}"})
+                                                                tts_playing = False
+                                                            except Exception as e:
+                                                                tts_playing = False
+                                                                logger.error(f"[WS {session_id}] TTS exception: {e}")
+                                                                await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"TTS exception: {e}"})
+                                                            finally:
+                                                                tts_cancel_event = None
+                                                            audio_buffer = bytearray()
+                                                            await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": False})
+                                                            continue
+                                                        # Normal TTS handoff logic continues here if TTS_ONLY is not set
                                                         tts_payload = {"text": llm2_text, "voice_type": rules.get("voice_type", "predefined")}
                                                         try:
                                                             tts_cancel_event = asyncio.Event()
@@ -208,9 +243,9 @@ async def voice_session_ws(websocket: WebSocket):
                                                             await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"TTS exception: {e}"})
                                                         finally:
                                                             tts_cancel_event = None
-                                                    else:
-                                                        logger.error(f"[WS {session_id}] LLM2 error: {llm2_resp.text}")
-                                                        await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"LLM2 error: {llm2_resp.text}"})
+                                                        audio_buffer = bytearray()
+                                                        await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": False})
+                                                        continue
                                                 except Exception as e:
                                                     logger.error(f"[WS {session_id}] LLM2 exception: {e}")
                                                     await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"LLM2 exception: {e}"})
