@@ -38,7 +38,10 @@ logging.info(f"[LLM2] GPT4O_MINI_API_VERSION={GPT4O_MINI_API_VERSION}")
 
 async def generate_response(user_query: str, persona_context: str, rules: dict = None, model: str = None, session_id: str = None, history: list = None, temperature: float = 1.0, top_p: float = 1.0):
     logging.info(f"[LLM2] generate_response called with session_id={session_id}, user_query={user_query}")
-    messages = [{"role": "system", "content": persona_context}]
+    messages = [
+        {"role": "system", "content": "Reply in a short, natural, conversational way. No more than 2 sentences. Avoid long or formal responses."},
+        {"role": "system", "content": persona_context}
+    ]
     if rules:
         messages.append({"role": "system", "content": f"Rules: {rules}"})
     if history:
@@ -53,9 +56,9 @@ async def generate_response(user_query: str, persona_context: str, rules: dict =
             logging.info(f"[LLM2] Sending to Azure: model={model or GPT4O_MINI_DEPLOYMENT}, messages={messages}")
             params = {
                 "messages": messages,
-                "max_completion_tokens": 4096,
+                "max_completion_tokens": 64,
                 "model": model or GPT4O_MINI_DEPLOYMENT,
-                "temperature": temperature,
+                "temperature": 0.7,
                 "top_p": top_p,
             }
             logging.info(f"[LLM2] Outgoing OpenAI params: {params}")

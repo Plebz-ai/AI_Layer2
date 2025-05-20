@@ -36,6 +36,9 @@ router = APIRouter()
 # Circuit breaker state
 circuit_breakers = {"llm1": {"failures": 0, "open_until": 0}, "llm2": {"failures": 0, "open_until": 0}, "stt": {"failures": 0, "open_until": 0}, "tts": {"failures": 0, "open_until": 0}}
 
+# Add in-memory cache for LLM1 context per session
+llm1_context_cache = {}
+
 @router.post("/voice-call/start")
 async def start_voice_call(user_id: str):
     """
@@ -134,23 +137,31 @@ async def orchestrate_interaction(user_input: str, character_details: dict, mode
         if mode == "chat":
             if not user_input or not character_details:
                 return {"response": "Missing user input or character details.", "audio_data": None, "error": {"orchestrator": "Missing required fields."}}
-            llm1_payload = {"user_input": user_input, "character_details": character_details}
-            if session_id:
-                llm1_payload["session_id"] = session_id
-            if history:
-                llm1_payload["history"] = history
-            logging.info(f"[request_id={request_id}] [latency] LLM1 payload: {json.dumps(llm1_payload)}")
-            llm1_start = time.time()
-            llm1_resp = await safe_post(client, LLM1_URL, llm1_payload, fallback={"context": "fallback-context", "rules": {}}, request_id=request_id, step_name="LLM1")
-            llm1_latency = (time.time() - llm1_start) * 1000
-            logging.info(f"[request_id={request_id}] [latency] LLM1 total: {llm1_latency:.2f}ms")
-            context = llm1_resp.json().get("context", "fallback-context")
-            rules = llm1_resp.json().get("rules", {})
-            llm1_error = None
-            if getattr(llm1_resp, 'status_code', 200) != 200 or context == "fallback-context":
-                llm1_error = getattr(llm1_resp, 'error_details', None) or llm1_resp.json().get("error") or "LLM1 failed to generate context."
-                logging.error(f"[request_id={request_id}] [latency] LLM1 failed. Error: {llm1_error}, Response: {llm1_resp.json()}")
-                return {"response": "Sorry, the character could not generate context. Please try again later.", "audio_data": None, "error": {"llm1": llm1_error}}
+            # Use session_id as cache key if available
+            cache_key = session_id or json.dumps(character_details, sort_keys=True)
+            if cache_key in llm1_context_cache:
+                context, rules = llm1_context_cache[cache_key]
+                logging.info(f"[request_id={request_id}] [latency] Using cached LLM1 context for session: {cache_key}")
+            else:
+                llm1_payload = {"user_input": user_input, "character_details": character_details}
+                if session_id:
+                    llm1_payload["session_id"] = session_id
+                if history:
+                    llm1_payload["history"] = history
+                logging.info(f"[request_id={request_id}] [latency] LLM1 payload: {json.dumps(llm1_payload)}")
+                llm1_start = time.time()
+                llm1_resp = await safe_post(client, LLM1_URL, llm1_payload, fallback={"context": "fallback-context", "rules": {}}, request_id=request_id, step_name="LLM1")
+                llm1_latency = (time.time() - llm1_start) * 1000
+                logging.info(f"[request_id={request_id}] [latency] LLM1 total: {llm1_latency:.2f}ms")
+                context = llm1_resp.json().get("context", "fallback-context")
+                rules = llm1_resp.json().get("rules", {})
+                llm1_error = None
+                if getattr(llm1_resp, 'status_code', 200) != 200 or context == "fallback-context":
+                    llm1_error = getattr(llm1_resp, 'error_details', None) or llm1_resp.json().get("error") or "LLM1 failed to generate context."
+                    logging.error(f"[request_id={request_id}] [latency] LLM1 failed. Error: {llm1_error}, Response: {llm1_resp.json()}")
+                    return {"response": "Sorry, the character could not generate context. Please try again later.", "audio_data": None, "error": {"llm1": llm1_error}}
+                # Cache the context and rules for this session
+                llm1_context_cache[cache_key] = (context, rules)
             model = os.getenv("AZURE_GPT4O_MINI_DEPLOYMENT", "gpt-4o-mini")
             llm2_payload = {"user_query": user_input, "persona_context": context, "rules": rules, "model": model}
             if session_id:

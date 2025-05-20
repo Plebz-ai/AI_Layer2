@@ -47,11 +47,11 @@ async def generate_context(user_input: str, character_details: dict, session_id:
         try:
             response = await client.chat.completions.create(
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "system", "content": "You are a friendly, concise conversational partner. Always reply in 1-2 sentences, like a real human chat. Avoid long or formal responses."},
                     {"role": "user", "content": prompt}
                 ],
-                max_completion_tokens=128,  # Lowered for rate limit safety
-                temperature=temperature,
+                max_completion_tokens=64,  # Lowered for concise context
+                temperature=0.7,
                 top_p=top_p,
                 model=GPT41_MINI_DEPLOYMENT,
             )
