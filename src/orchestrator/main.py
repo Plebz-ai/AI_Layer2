@@ -65,11 +65,13 @@ async def interact(req: OrchestratorRequest, request: Request):
             audio_data=req.audio_data
         )
         logger.info(f"[request_id={request_id}] /interact response: response length={len(result.get('response',''))}, audio_data length={len(result.get('audio_data') or '')}")
+        if result.get("error"):
+            return JSONResponse(status_code=500, content={"response": result.get("response", "Sorry, something went wrong."), "audio_data": result.get("audio_data"), "error": result["error"]})
         return OrchestratorResponse(**result)
     except Exception as e:
         logger.error(f"[request_id={request_id}] Exception in /interact: {e}")
         logger.error(traceback.format_exc())
-        return OrchestratorResponse(response="Sorry, something went wrong.", audio_data=None)
+        return JSONResponse(status_code=500, content={"response": "Sorry, something went wrong.", "audio_data": None, "error": {"exception": str(e)}})
 
 @app.get("/health")
 async def health():
