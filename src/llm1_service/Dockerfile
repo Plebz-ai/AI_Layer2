@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 RUN pip install --no-cache-dir -r requirements.txt
 # Copy only the service code
 COPY . .
+ENV PYTHONPATH=/app
 EXPOSE 8001
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
 HEALTHCHECK CMD curl --fail http://localhost:8001/health || exit 1 
