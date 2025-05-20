@@ -68,6 +68,8 @@ async def voice_session_ws(websocket: WebSocket):
         speaking = False
         silence_counter = 0
         max_silence_chunks = 10  # Tune for your chunk size and latency
+        tts_playing = False
+        tts_cancel_event = None
         while True:
             msg = await websocket.receive()
             if msg["type"] == "websocket.disconnect":
@@ -77,6 +79,14 @@ async def voice_session_ws(websocket: WebSocket):
                     audio_chunk = msg["bytes"]
                     # VAD: detect speech
                     speech_detected = is_speech(audio_chunk)
+                    # --- BARGE-IN LOGIC ---
+                    if tts_playing and speech_detected:
+                        # User is speaking while TTS is playing: barge-in
+                        tts_playing = False
+                        if tts_cancel_event:
+                            tts_cancel_event.set()
+                        await websocket.send_json({"type": MSG_TYPE_BARGE_IN})
+                    # --- END BARGE-IN ---
                     if speech_detected:
                         sessions[session_id]["buffer"] += audio_chunk
                         silence_counter = 0
@@ -125,16 +135,24 @@ async def voice_session_ws(websocket: WebSocket):
                                                         voice_type = rules.get("voice_type", "predefined")
                                                         tts_payload = {"text": llm2_text, "voice_type": voice_type}
                                                         try:
+                                                            import asyncio
+                                                            tts_cancel_event = asyncio.Event()
+                                                            tts_playing = True
                                                             async with client.stream("POST", tts_url, json=tts_payload, headers=llm2_headers) as tts_resp:
                                                                 if tts_resp.status_code == 200:
                                                                     async for chunk in tts_resp.aiter_text():
-                                                                        # Each chunk is base64-encoded audio
+                                                                        if tts_cancel_event.is_set():
+                                                                            break
                                                                         await websocket.send_json({"type": MSG_TYPE_TTS_CHUNK, "audio": chunk})
                                                                     await websocket.send_json({"type": MSG_TYPE_TTS_END})
                                                                 else:
                                                                     await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"TTS error: {tts_resp.text}"})
+                                                            tts_playing = False
                                                         except Exception as e:
+                                                            tts_playing = False
                                                             await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"TTS exception: {e}"})
+                                                        finally:
+                                                            tts_cancel_event = None
                                                     else:
                                                         await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"LLM2 error: {llm2_resp.text}"})
                                                 except Exception as e:
