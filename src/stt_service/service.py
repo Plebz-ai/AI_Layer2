@@ -34,10 +34,17 @@ async def stream_deepgram(audio_chunk_iterable):
     headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
     async with httpx.AsyncClient() as client:
         async with client.ws_connect(DEEPGRAM_URL, headers=headers) as ws:
+            chunk_count = 0
             async for chunk in audio_chunk_iterable:
-                await ws.send_bytes(chunk)
-                msg = await ws.receive_json()
-                transcript = msg.get("channel", {}).get("alternatives", [{}])[0].get("transcript", "")
-                if transcript:
-                    yield transcript
+                chunk_count += 1
+                logger.info(f"[STT] Received audio chunk #{chunk_count}, size={len(chunk)} bytes")
+                try:
+                    await ws.send_bytes(chunk)
+                    msg = await ws.receive_json()
+                    transcript = msg.get("channel", {}).get("alternatives", [{}])[0].get("transcript", "")
+                    if transcript:
+                        logger.info(f"[STT] Deepgram transcript: {transcript}")
+                        yield transcript
+                except Exception as e:
+                    logger.error(f"[STT] Error sending chunk or receiving transcript: {e}")
             await ws.aclose() 

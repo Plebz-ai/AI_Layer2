@@ -1,6 +1,6 @@
 from dotenv import load_dotenv
 import os
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request, status, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from typing import Optional
 from service import orchestrate_interaction, router as voice_router
@@ -11,6 +11,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
 import time
 import uuid
+import webrtcvad
+import asyncio
+import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("orchestrator")
@@ -145,7 +148,7 @@ async def stream_speech_to_text(request: Request):
     - For real-time/streaming voice, use the WebSocket endpoint instead.
     """
     request_id = getattr(request.state, 'request_id', 'unknown')
-    logger.info(f"[request_id={request_id}] /stream-speech-to-text called")
+    logger.info(f"[request_id={request_id}] /stream-speech-to-text called (method={request.method}) headers={dict(request.headers)}")
     stt_url = "http://stt_service:8003/stream-speech-to-text"
     start = time.time()
     INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "changeme-internal-key")
@@ -157,6 +160,10 @@ async def stream_speech_to_text(request: Request):
                     async for chunk in resp.aiter_bytes():
                         yield chunk
             response = StreamingResponse(proxy(), media_type="text/plain")
+            # Add CORS headers explicitly for streaming POST
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type"
             latency = (time.time() - start) * 1000
             logger.info(f"[request_id={request_id}] /stream-speech-to-text setup complete | Latency: {latency:.2f}ms")
             return response
@@ -182,4 +189,67 @@ async def stream_text_to_speech(request: Request):
             return response
         except Exception as e:
             logger.error(f"[request_id={request_id}] /stream-text-to-speech error: {e}")
-            raise HTTPException(status_code=500, detail=str(e)) 
+            raise HTTPException(status_code=500, detail=str(e))
+
+@app.websocket("/ws/voice-session")
+async def voice_session_ws(websocket: WebSocket):
+    await websocket.accept()
+    logger.info("[WS] /ws/voice-session: client connected")
+    vad = webrtcvad.Vad(2)  # Moderate aggressiveness
+    audio_buffer = b''
+    deepgram_ws = None
+    try:
+        # Wait for INIT message
+        init_msg = await websocket.receive_text()
+        init = json.loads(init_msg)
+        character_details = init.get('characterDetails', {})
+        logger.info(f"[WS] INIT: {character_details}")
+        # Connect to Deepgram
+        deepgram_url = "wss://api.deepgram.com/v1/listen?model=nova-3&smart_format=true"
+        headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
+        async with httpx.AsyncClient() as client:
+            async with client.ws_connect(deepgram_url, headers=headers) as dg_ws:
+                deepgram_ws = dg_ws
+                async def send_to_deepgram():
+                    while True:
+                        chunk = await websocket.receive_bytes()
+                        audio_buffer = chunk
+                        # VAD: Only send if speech
+                        if vad.is_speech(chunk[:320], 16000):
+                            await dg_ws.send_bytes(chunk)
+                async def receive_from_deepgram():
+                    async for msg in dg_ws.iter_text():
+                        data = json.loads(msg)
+                        transcript = data.get('channel', {}).get('alternatives', [{}])[0].get('transcript', '')
+                        if transcript:
+                            await websocket.send_text(json.dumps({"type": "transcript", "text": transcript}))
+                            # On final transcript, call LLM and TTS
+                            if data.get('is_final'):
+                                llm_response = await call_llm(transcript, character_details)
+                                async for tts_chunk in stream_elevenlabs_tts(llm_response, character_details):
+                                    await websocket.send_bytes(tts_chunk)
+                await asyncio.gather(send_to_deepgram(), receive_from_deepgram())
+    except WebSocketDisconnect:
+        logger.info("[WS] /ws/voice-session: client disconnected")
+    except Exception as e:
+        logger.error(f"[WS] /ws/voice-session error: {e}")
+        await websocket.close()
+    finally:
+        if deepgram_ws:
+            await deepgram_ws.close()
+
+# Helper: Call LLM (stub)
+async def call_llm(transcript, character_details):
+    # ... call your LLM1/LLM2 logic here ...
+    return f"Echo: {transcript}"
+
+# Helper: Stream ElevenLabs TTS (PCM output)
+async def stream_elevenlabs_tts(text, character_details):
+    voice_id = character_details.get('voice_id', 'default')
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format=pcm_16000"
+    headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
+    payload = {"text": text, "model_id": "eleven_flash_v2.5"}
+    async with httpx.AsyncClient(timeout=None) as client:
+        async with client.stream("POST", url, headers=headers, json=payload) as resp:
+            async for chunk in resp.aiter_bytes():
+                yield chunk 
