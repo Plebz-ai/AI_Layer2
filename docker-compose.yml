@@ -58,6 +58,7 @@ services:
       - "6379:6379"
     restart: unless-stopped
   orchestrator:
+    # Use src as build context so Dockerfile can access orchestrator/, speech/, and utils/
     build:
       context: ./src
       dockerfile: orchestrator/Dockerfile

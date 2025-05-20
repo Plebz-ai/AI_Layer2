@@ -2,15 +2,14 @@ import json
 import logging
 import uuid
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from fastapi.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketState
-from typing import Dict, Any
-from speech.vad import is_speech
 import base64
 import httpx
 import os
 import asyncio
 from utils.redis_session import get_session, set_session, delete_session
+from speech.vad import is_speech
+import sys
 
 router = APIRouter()
 logger = logging.getLogger("voice_ws")
@@ -29,47 +28,16 @@ MSG_TYPE_BARGE_IN = "barge_in"
 MSG_TYPE_GREETING = "greeting"
 MSG_TYPE_ERROR = "error"
 
-"""
-WebSocket Voice-to-Voice Conversational Pipeline
-------------------------------------------------
-This module implements a real-time, low-latency, streaming voice-to-voice AI pipeline with:
-- Voice Activity Detection (VAD)
-- Streaming Speech-to-Text (STT)
-- Multi-turn, context-aware LLM2
-- Streaming Text-to-Speech (TTS)
-- Barge-in (interrupt AI speech with user speech)
-- Robust error handling, session management, and logging
+# Service URLs (use orchestrator/service.py logic)
+STT_URL = os.getenv("STT_URL", "http://stt_service:8003/speech-to-text")
+LLM2_URL = os.getenv("LLM2_URL", "http://llm2_service:8002/generate-response")
+TTS_STREAM_URL = os.getenv("TTS_STREAM_URL", "http://tts_service:8004/stream-text-to-speech")
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "changeme-internal-key")
 
-WebSocket Message Types:
-- init: {"type": "init", "character_details": {...}} (sent by frontend to start session)
-- vad_state: {"type": "vad_state", "speaking": true/false}
-- transcript_final: {"type": "transcript_final", "text": ...}
-- llm2_final: {"type": "llm2_final", "text": ...}
-- tts_chunk: {"type": "tts_chunk", "audio": ...} (base64-encoded audio chunk)
-- tts_end: {"type": "tts_end"}
-- barge_in: {"type": "barge_in"} (sent when user interrupts TTS)
-- greeting: {"type": "greeting", "text": ...}
-- error: {"type": "error", "error": ...}
-
-Pipeline Flow:
-1. Frontend sends 'init' with character details. LLM1 context is generated and cached.
-2. AI greets the user (greeting message).
-3. User streams audio chunks. VAD detects speech and silence.
-4. On end of utterance, buffered audio is sent to STT. Transcript is sent to frontend.
-5. Transcript and session history are sent to LLM2. LLM2 response is sent to frontend.
-6. LLM2 response is sent to TTS. Audio chunks are streamed to frontend.
-7. If user speaks during TTS, barge-in cancels TTS and restarts the pipeline.
-8. All errors are logged and sent to frontend as error messages.
-
-To extend: Add new message types, swap out STT/LLM2/TTS endpoints, or add analytics as needed.
-"""
+print("[STARTUP] voice_ws.py loaded", file=sys.stderr)
 
 @router.websocket("/ws/voice-session")
 async def voice_session_ws(websocket: WebSocket):
-    """
-    Main WebSocket endpoint for real-time voice-to-voice conversation.
-    Handles session setup, VAD, STT, LLM2, TTS, barge-in, and session management.
-    """
     await websocket.accept()
     session_id = str(uuid.uuid4())
     logger.info(f"[WS] New voice session: {session_id}")
@@ -77,13 +45,12 @@ async def voice_session_ws(websocket: WebSocket):
         "id": session_id,
         "state": {},
         "buffer": bytearray(),
-        "vad": None,
         "llm1_context": None,
         "character_details": None,
         "history": [],
         "tts_playing": False,
     }
-    await set_session(session_id, {**session_data, "buffer": ""})  # buffer as base64 string for Redis
+    await set_session(session_id, {**session_data, "buffer": ""})
     try:
         # 1. Wait for INIT message with character details
         init_msg = await websocket.receive_text()
@@ -115,67 +82,54 @@ async def voice_session_ws(websocket: WebSocket):
         tts_playing = False
         tts_cancel_event = None
         history = []
-        while True:
-            try:
-                msg = await websocket.receive()
-            except Exception as e:
-                logger.error(f"[WS {session_id}] Error receiving message: {e}")
-                break
-            if msg["type"] == "websocket.disconnect":
-                logger.info(f"[WS {session_id}] WebSocket disconnected.")
-                break
-            if msg["type"] == "websocket.receive":
-                if "bytes" in msg:
-                    audio_chunk = msg["bytes"]
-                    try:
-                        speech_detected = is_speech(audio_chunk)
-                    except Exception as e:
-                        logger.error(f"[WS {session_id}] VAD error: {e}")
-                        await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"VAD error: {e}"})
-                        continue
-                    # --- BARGE-IN LOGIC ---
-                    if tts_playing and speech_detected:
-                        tts_playing = False
-                        if tts_cancel_event:
-                            tts_cancel_event.set()
-                        logger.info(f"[WS {session_id}] Barge-in: user started speaking during TTS.")
-                        await websocket.send_json({"type": MSG_TYPE_BARGE_IN})
-                    # --- END BARGE-IN ---
-                    if speech_detected:
-                        session = await get_session(session_id)
-                        buffer_bytes = base64.b64decode(session["buffer"]) if session["buffer"] else b""
-                        buffer_bytes += audio_chunk
-                        session["buffer"] = base64.b64encode(buffer_bytes).decode("utf-8")
-                        await set_session(session_id, session)
-                        silence_counter = 0
-                        if not speaking:
-                            speaking = True
-                            await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": True})
-                    else:
-                        if speaking:
-                            silence_counter += 1
-                            if silence_counter >= max_silence_chunks:
-                                speaking = False
-                                await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": False})
-                                session = await get_session(session_id)
-                                audio_bytes = base64.b64decode(session["buffer"]) if session["buffer"] else b""
-                                session["buffer"] = ""
-                                await set_session(session_id, session)
-                                silence_counter = 0
-                                if audio_bytes:
-                                    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-                                    stt_url = "http://stt_service:8003/speech-to-text"
-                                    payload = {"audio_data": audio_b64}
-                                    try:
-                                        async with httpx.AsyncClient(timeout=10) as client:
-                                            try:
-                                                resp = await client.post(stt_url, json=payload, timeout=10)
-                                            except Exception as e:
-                                                logger.error(f"[WS {session_id}] STT service call failed: {e}")
-                                                await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"STT service error: {e}"})
-                                                continue
-                                            if resp.status_code == 200:
-                                                transcript = resp.json().get("transcript", "")
+        audio_buffer = bytearray()
+        async with httpx.AsyncClient(timeout=None) as client:
+            while True:
+                try:
+                    msg = await websocket.receive()
+                except Exception as e:
+                    logger.error(f"[WS {session_id}] Error receiving message: {e}")
+                    break
+                if msg["type"] == "websocket.disconnect":
+                    logger.info(f"[WS {session_id}] WebSocket disconnected.")
+                    break
+                if msg["type"] == "websocket.receive":
+                    if "bytes" in msg:
+                        audio_chunk = msg["bytes"]
+                        try:
+                            speech_detected = is_speech(audio_chunk)
+                        except Exception as e:
+                            logger.error(f"[WS {session_id}] VAD error: {e}")
+                            await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"VAD error: {e}"})
+                            continue
+                        # --- BARGE-IN LOGIC ---
+                        if tts_playing and speech_detected:
+                            tts_playing = False
+                            if tts_cancel_event:
+                                tts_cancel_event.set()
+                            logger.info(f"[WS {session_id}] Barge-in: user started speaking during TTS.")
+                            await websocket.send_json({"type": MSG_TYPE_BARGE_IN})
+                        # --- END BARGE-IN ---
+                        if speech_detected:
+                            audio_buffer.extend(audio_chunk)
+                            silence_counter = 0
+                            if not speaking:
+                                speaking = True
+                                await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": True})
+                        else:
+                            if speaking:
+                                silence_counter += 1
+                                if silence_counter >= max_silence_chunks:
+                                    speaking = False
+                                    await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": False})
+                                    # --- End of utterance: send to STT ---
+                                    if audio_buffer:
+                                        audio_b64 = base64.b64encode(audio_buffer).decode("utf-8")
+                                        stt_payload = {"audio_data": audio_b64}
+                                        try:
+                                            stt_resp = await client.post(STT_URL, json=stt_payload, headers={"x-internal-api-key": INTERNAL_API_KEY}, timeout=15)
+                                            if stt_resp.status_code == 200:
+                                                transcript = stt_resp.json().get("transcript", "")
                                                 await websocket.send_json({"type": MSG_TYPE_TRANSCRIPT_FINAL, "text": transcript})
                                                 logger.info(f"[WS {session_id}] STT transcript: {transcript}")
                                                 # --- SESSION HISTORY: Add user message ---
@@ -185,7 +139,6 @@ async def voice_session_ws(websocket: WebSocket):
                                                 session["history"] = history
                                                 await set_session(session_id, session)
                                                 # --- LLM2 HANDOFF ---
-                                                llm2_url = "http://llm2_service:8002/generate-response"
                                                 persona_context = session["llm1_context"]
                                                 rules = session["character_details"]
                                                 llm2_payload = {
@@ -195,13 +148,7 @@ async def voice_session_ws(websocket: WebSocket):
                                                     "history": history,
                                                 }
                                                 try:
-                                                    llm2_headers = {"x-internal-api-key": os.getenv("INTERNAL_API_KEY", "changeme-internal-key")}
-                                                    try:
-                                                        llm2_resp = await client.post(llm2_url, json=llm2_payload, headers=llm2_headers, timeout=20)
-                                                    except Exception as e:
-                                                        logger.error(f"[WS {session_id}] LLM2 service call failed: {e}")
-                                                        await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"LLM2 service error: {e}"})
-                                                        continue
+                                                    llm2_resp = await client.post(LLM2_URL, json=llm2_payload, headers={"x-internal-api-key": INTERNAL_API_KEY}, timeout=20)
                                                     if llm2_resp.status_code == 200:
                                                         llm2_text = llm2_resp.json().get("response", "")
                                                         await websocket.send_json({"type": MSG_TYPE_LLM2_FINAL, "text": llm2_text})
@@ -213,27 +160,21 @@ async def voice_session_ws(websocket: WebSocket):
                                                         session["history"] = history
                                                         await set_session(session_id, session)
                                                         # --- TTS HANDOFF ---
-                                                        tts_url = "http://tts_service:8004/stream-text-to-speech"
-                                                        voice_type = rules.get("voice_type", "predefined")
-                                                        tts_payload = {"text": llm2_text, "voice_type": voice_type}
+                                                        tts_payload = {"text": llm2_text, "voice_type": rules.get("voice_type", "predefined")}
                                                         try:
                                                             tts_cancel_event = asyncio.Event()
                                                             tts_playing = True
-                                                            try:
-                                                                async with client.stream("POST", tts_url, json=tts_payload, headers=llm2_headers, timeout=30) as tts_resp:
-                                                                    if tts_resp.status_code == 200:
-                                                                        async for chunk in tts_resp.aiter_text():
-                                                                            if tts_cancel_event.is_set():
-                                                                                logger.info(f"[WS {session_id}] TTS stream cancelled by barge-in.")
-                                                                                break
-                                                                            await websocket.send_json({"type": MSG_TYPE_TTS_CHUNK, "audio": chunk})
-                                                                        await websocket.send_json({"type": MSG_TYPE_TTS_END})
-                                                                    else:
-                                                                        logger.error(f"[WS {session_id}] TTS error: {tts_resp.text}")
-                                                                        await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"TTS error: {tts_resp.text}"})
-                                                            except Exception as e:
-                                                                logger.error(f"[WS {session_id}] TTS streaming error: {e}")
-                                                                await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"TTS streaming error: {e}"})
+                                                            async with client.stream("POST", TTS_STREAM_URL, json=tts_payload, headers={"x-internal-api-key": INTERNAL_API_KEY}, timeout=30) as tts_resp:
+                                                                if tts_resp.status_code == 200:
+                                                                    async for chunk in tts_resp.aiter_text():
+                                                                        if tts_cancel_event.is_set():
+                                                                            logger.info(f"[WS {session_id}] TTS stream cancelled by barge-in.")
+                                                                            break
+                                                                        await websocket.send_json({"type": MSG_TYPE_TTS_CHUNK, "audio": chunk})
+                                                                    await websocket.send_json({"type": MSG_TYPE_TTS_END})
+                                                                else:
+                                                                    logger.error(f"[WS {session_id}] TTS error: {tts_resp.text}")
+                                                                    await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"TTS error: {tts_resp.text}"})
                                                             tts_playing = False
                                                         except Exception as e:
                                                             tts_playing = False
@@ -247,13 +188,14 @@ async def voice_session_ws(websocket: WebSocket):
                                                 except Exception as e:
                                                     logger.error(f"[WS {session_id}] LLM2 exception: {e}")
                                                     await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"LLM2 exception: {e}"})
-                                            else:
-                                                logger.error(f"[WS {session_id}] STT error: {resp.text}")
-                                                await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"STT error: {resp.text}"})
-                                    except Exception as e:
-                                        logger.error(f"[WS {session_id}] STT exception: {e}")
-                                        await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"STT exception: {e}"})
-                        # If not speaking, just ignore silence
+                                        except Exception as e:
+                                            logger.error(f"[WS {session_id}] STT exception: {e}")
+                                            await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"STT exception: {e}"})
+                                        audio_buffer = bytearray()
+                                        await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": False})
+                            elif len(audio_buffer) > 0:
+                                # Still collecting silence, add to buffer
+                                audio_buffer.extend(audio_chunk)
     except WebSocketDisconnect:
         logger.info(f"[WS {session_id}] Session disconnected (WebSocketDisconnect)")
     except Exception as e:
