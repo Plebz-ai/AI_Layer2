@@ -5,6 +5,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketState
 from typing import Dict, Any
+from speech.vad import is_speech
+import base64
+import httpx
 
 router = APIRouter()
 logger = logging.getLogger("voice_ws")
@@ -61,15 +64,53 @@ async def voice_session_ws(websocket: WebSocket):
         greeting_text = f"Hello, I am {init_data['character_details'].get('name', 'your assistant')}! How can I help you today?"
         await websocket.send_json({"type": MSG_TYPE_GREETING, "text": greeting_text})
         # 4. Main loop: handle audio, VAD, STT, LLM2, TTS, barge-in, etc.
+        speaking = False
+        silence_counter = 0
+        max_silence_chunks = 10  # Tune for your chunk size and latency
         while True:
             msg = await websocket.receive()
             if msg["type"] == "websocket.disconnect":
                 break
             if msg["type"] == "websocket.receive":
                 if "bytes" in msg:
-                    # Audio chunk from user
-                    # TODO: VAD, buffer, STT, barge-in, etc.
-                    pass
+                    audio_chunk = msg["bytes"]
+                    # VAD: detect speech
+                    speech_detected = is_speech(audio_chunk)
+                    if speech_detected:
+                        sessions[session_id]["buffer"] += audio_chunk
+                        silence_counter = 0
+                        if not speaking:
+                            speaking = True
+                            await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": True})
+                    else:
+                        if speaking:
+                            silence_counter += 1
+                            if silence_counter >= max_silence_chunks:
+                                # End of utterance detected
+                                speaking = False
+                                await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": False})
+                                # --- STT HANDOFF ---
+                                audio_bytes = bytes(sessions[session_id]["buffer"])
+                                sessions[session_id]["buffer"] = bytearray()
+                                silence_counter = 0
+                                if audio_bytes:
+                                    # Encode to base64 for STT REST API
+                                    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                                    stt_url = "http://stt_service:8003/speech-to-text"
+                                    payload = {"audio_data": audio_b64}
+                                    try:
+                                        async with httpx.AsyncClient() as client:
+                                            resp = await client.post(stt_url, json=payload)
+                                            if resp.status_code == 200:
+                                                transcript = resp.json().get("transcript", "")
+                                                await websocket.send_json({"type": MSG_TYPE_TRANSCRIPT_FINAL, "text": transcript})
+                                                # TODO: Handoff to LLM2 next
+                                            else:
+                                                await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"STT error: {resp.text}"})
+                                    except Exception as e:
+                                        await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"STT exception: {e}"})
+                        # If not speaking, just ignore silence
+                    # TODO: Barge-in logic if TTS is playing
                 elif "text" in msg:
                     # Control message (future: barge-in, etc.)
                     pass
