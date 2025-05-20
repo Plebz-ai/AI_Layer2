@@ -196,4 +196,62 @@ The API documentation is available at `/docs` when running the services.
 - [x] Healthcheck endpoints implemented
 - [x] Logging to stdout/stderr
 - [x] No secrets in Dockerfile or code
-- [x] Resource limits set in Docker Compose (optional) 
+- [x] Resource limits set in Docker Compose (optional)
+
+## Voice-to-Voice Conversational Pipeline
+
+### Overview
+This system enables real-time, low-latency, streaming voice conversations between users and AI-powered custom characters. It features:
+- Voice Activity Detection (VAD)
+- Streaming Speech-to-Text (STT)
+- Multi-turn, context-aware LLM2
+- Streaming Text-to-Speech (TTS)
+- Barge-in (interrupt AI speech with user speech)
+- Robust error handling, session management, and logging
+
+### How to Run
+1. **Prerequisites:**
+   - Docker and Docker Compose installed
+   - Python 3.8+ (for local development)
+   - (Optional) Set `INTERNAL_API_KEY` in your environment for secure service calls
+2. **Start all services:**
+   ```sh
+   cd AI_Layer2
+   docker-compose up --build
+   ```
+3. **Check health:**
+   - Each service exposes a health endpoint (e.g., `/health`)
+   - Logs are available in the Docker output
+
+### WebSocket Protocol (Frontend Integration)
+- Connect to: `ws://<host>:8010/ws/voice-session`
+- **Message Types:**
+  - `init`: `{ "type": "init", "character_details": { ... } }` (start session)
+  - `vad_state`: `{ "type": "vad_state", "speaking": true/false }`
+  - `transcript_final`: `{ "type": "transcript_final", "text": ... }`
+  - `llm2_final`: `{ "type": "llm2_final", "text": ... }`
+  - `tts_chunk`: `{ "type": "tts_chunk", "audio": ... }` (base64-encoded audio)
+  - `tts_end`: `{ "type": "tts_end" }`
+  - `barge_in`: `{ "type": "barge_in" }`
+  - `greeting`: `{ "type": "greeting", "text": ... }`
+  - `error`: `{ "type": "error", "error": ... }`
+- **Audio Streaming:**
+  - Send raw PCM 16kHz mono audio chunks as binary WebSocket frames
+  - Receive TTS audio as base64-encoded chunks
+
+### Debugging & Monitoring
+- All major events and errors are logged (see Docker logs)
+- Errors are also sent to the frontend as `error` messages
+- Session state is in-memory (for production, use Redis or another store)
+
+### Extending the Pipeline
+- **Add new message types:** Edit `voice_ws.py` and update the frontend accordingly
+- **Swap out STT/LLM2/TTS:** Change the service URLs in `voice_ws.py` or add new endpoints
+- **Add analytics, logging, or monitoring:** Use the logging hooks in `voice_ws.py`
+- **Production tips:**
+  - Use a persistent session store (e.g., Redis)
+  - Secure internal APIs with strong keys
+  - Tune VAD and silence detection for your use case
+
+---
+For questions or contributions, see the code comments in `src/orchestrator/voice_ws.py` or open an issue. 

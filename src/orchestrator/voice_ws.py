@@ -31,8 +31,47 @@ MSG_TYPE_BARGE_IN = "barge_in"
 MSG_TYPE_GREETING = "greeting"
 MSG_TYPE_ERROR = "error"
 
+"""
+WebSocket Voice-to-Voice Conversational Pipeline
+------------------------------------------------
+This module implements a real-time, low-latency, streaming voice-to-voice AI pipeline with:
+- Voice Activity Detection (VAD)
+- Streaming Speech-to-Text (STT)
+- Multi-turn, context-aware LLM2
+- Streaming Text-to-Speech (TTS)
+- Barge-in (interrupt AI speech with user speech)
+- Robust error handling, session management, and logging
+
+WebSocket Message Types:
+- init: {"type": "init", "character_details": {...}} (sent by frontend to start session)
+- vad_state: {"type": "vad_state", "speaking": true/false}
+- transcript_final: {"type": "transcript_final", "text": ...}
+- llm2_final: {"type": "llm2_final", "text": ...}
+- tts_chunk: {"type": "tts_chunk", "audio": ...} (base64-encoded audio chunk)
+- tts_end: {"type": "tts_end"}
+- barge_in: {"type": "barge_in"} (sent when user interrupts TTS)
+- greeting: {"type": "greeting", "text": ...}
+- error: {"type": "error", "error": ...}
+
+Pipeline Flow:
+1. Frontend sends 'init' with character details. LLM1 context is generated and cached.
+2. AI greets the user (greeting message).
+3. User streams audio chunks. VAD detects speech and silence.
+4. On end of utterance, buffered audio is sent to STT. Transcript is sent to frontend.
+5. Transcript and session history are sent to LLM2. LLM2 response is sent to frontend.
+6. LLM2 response is sent to TTS. Audio chunks are streamed to frontend.
+7. If user speaks during TTS, barge-in cancels TTS and restarts the pipeline.
+8. All errors are logged and sent to frontend as error messages.
+
+To extend: Add new message types, swap out STT/LLM2/TTS endpoints, or add analytics as needed.
+"""
+
 @router.websocket("/ws/voice-session")
 async def voice_session_ws(websocket: WebSocket):
+    """
+    Main WebSocket endpoint for real-time voice-to-voice conversation.
+    Handles session setup, VAD, STT, LLM2, TTS, barge-in, and session management.
+    """
     await websocket.accept()
     session_id = str(uuid.uuid4())
     logger.info(f"[WS] New voice session: {session_id}")
