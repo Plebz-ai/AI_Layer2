@@ -52,6 +52,11 @@ services:
         limits:
           cpus: '0.5'
           memory: 256M
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
   orchestrator:
     build:
       context: ./src/orchestrator
@@ -63,6 +68,7 @@ services:
       - llm2_service
       - stt_service
       - tts_service
+      - redis
     env_file:
       - ./.env
     deploy:

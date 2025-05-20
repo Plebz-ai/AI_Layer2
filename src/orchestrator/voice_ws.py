@@ -10,12 +10,10 @@ import base64
 import httpx
 import os
 import asyncio
+from utils.redis_session import get_session, set_session, delete_session
 
 router = APIRouter()
 logger = logging.getLogger("voice_ws")
-
-# Session state store (in-memory for now)
-sessions: Dict[str, Dict[str, Any]] = {}
 
 # Message types
 MSG_TYPE_INIT = "init"
@@ -75,16 +73,17 @@ async def voice_session_ws(websocket: WebSocket):
     await websocket.accept()
     session_id = str(uuid.uuid4())
     logger.info(f"[WS] New voice session: {session_id}")
-    sessions[session_id] = {
+    session_data = {
         "id": session_id,
         "state": {},
         "buffer": bytearray(),
-        "vad": None,  # To be filled with VAD state
+        "vad": None,
         "llm1_context": None,
         "character_details": None,
         "history": [],
         "tts_playing": False,
     }
+    await set_session(session_id, {**session_data, "buffer": ""})  # buffer as base64 string for Redis
     try:
         # 1. Wait for INIT message with character details
         init_msg = await websocket.receive_text()
@@ -97,11 +96,14 @@ async def voice_session_ws(websocket: WebSocket):
             await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"Invalid INIT: {e}"})
             await websocket.close()
             return
-        sessions[session_id]["character_details"] = init_data["character_details"]
+        session = await get_session(session_id)
+        session["character_details"] = init_data["character_details"]
+        await set_session(session_id, session)
         logger.info(f"[WS {session_id}] Session initialized with character: {init_data['character_details']}")
         # 2. Run LLM1 to generate system prompt/context (stub for now)
         llm1_context = f"[SYSTEM_PROMPT for {init_data['character_details'].get('name', 'character')}]"
-        sessions[session_id]["llm1_context"] = llm1_context
+        session["llm1_context"] = llm1_context
+        await set_session(session_id, session)
         # 3. Send AI greeting (stub for now)
         greeting_text = f"Hello, I am {init_data['character_details'].get('name', 'your assistant')}! How can I help you today?"
         await websocket.send_json({"type": MSG_TYPE_GREETING, "text": greeting_text})
@@ -109,11 +111,10 @@ async def voice_session_ws(websocket: WebSocket):
         # 4. Main loop: handle audio, VAD, STT, LLM2, TTS, barge-in, etc.
         speaking = False
         silence_counter = 0
-        max_silence_chunks = 10  # Tune for your chunk size and latency
+        max_silence_chunks = 10
         tts_playing = False
         tts_cancel_event = None
         history = []
-        sessions[session_id]["history"] = history
         while True:
             try:
                 msg = await websocket.receive()
@@ -141,7 +142,11 @@ async def voice_session_ws(websocket: WebSocket):
                         await websocket.send_json({"type": MSG_TYPE_BARGE_IN})
                     # --- END BARGE-IN ---
                     if speech_detected:
-                        sessions[session_id]["buffer"] += audio_chunk
+                        session = await get_session(session_id)
+                        buffer_bytes = base64.b64decode(session["buffer"]) if session["buffer"] else b""
+                        buffer_bytes += audio_chunk
+                        session["buffer"] = base64.b64encode(buffer_bytes).decode("utf-8")
+                        await set_session(session_id, session)
                         silence_counter = 0
                         if not speaking:
                             speaking = True
@@ -152,8 +157,10 @@ async def voice_session_ws(websocket: WebSocket):
                             if silence_counter >= max_silence_chunks:
                                 speaking = False
                                 await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": False})
-                                audio_bytes = bytes(sessions[session_id]["buffer"])
-                                sessions[session_id]["buffer"] = bytearray()
+                                session = await get_session(session_id)
+                                audio_bytes = base64.b64decode(session["buffer"]) if session["buffer"] else b""
+                                session["buffer"] = ""
+                                await set_session(session_id, session)
                                 silence_counter = 0
                                 if audio_bytes:
                                     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
@@ -172,11 +179,15 @@ async def voice_session_ws(websocket: WebSocket):
                                                 await websocket.send_json({"type": MSG_TYPE_TRANSCRIPT_FINAL, "text": transcript})
                                                 logger.info(f"[WS {session_id}] STT transcript: {transcript}")
                                                 # --- SESSION HISTORY: Add user message ---
+                                                session = await get_session(session_id)
+                                                history = session.get("history", [])
                                                 history.append({"sender": "user", "content": transcript})
+                                                session["history"] = history
+                                                await set_session(session_id, session)
                                                 # --- LLM2 HANDOFF ---
                                                 llm2_url = "http://llm2_service:8002/generate-response"
-                                                persona_context = sessions[session_id]["llm1_context"]
-                                                rules = sessions[session_id]["character_details"]
+                                                persona_context = session["llm1_context"]
+                                                rules = session["character_details"]
                                                 llm2_payload = {
                                                     "user_query": transcript,
                                                     "persona_context": persona_context,
@@ -196,7 +207,11 @@ async def voice_session_ws(websocket: WebSocket):
                                                         await websocket.send_json({"type": MSG_TYPE_LLM2_FINAL, "text": llm2_text})
                                                         logger.info(f"[WS {session_id}] LLM2 response: {llm2_text}")
                                                         # --- SESSION HISTORY: Add AI message ---
+                                                        session = await get_session(session_id)
+                                                        history = session.get("history", [])
                                                         history.append({"sender": "character", "content": llm2_text})
+                                                        session["history"] = history
+                                                        await set_session(session_id, session)
                                                         # --- TTS HANDOFF ---
                                                         tts_url = "http://tts_service:8004/stream-text-to-speech"
                                                         voice_type = rules.get("voice_type", "predefined")
@@ -249,7 +264,7 @@ async def voice_session_ws(websocket: WebSocket):
             pass
     finally:
         logger.info(f"[WS {session_id}] Cleaning up session.")
-        sessions.pop(session_id, None)
+        await delete_session(session_id)
         if websocket.application_state != WebSocketState.DISCONNECTED:
             try:
                 await websocket.close()
