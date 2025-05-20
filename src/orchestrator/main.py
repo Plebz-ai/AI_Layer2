@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException, Request, status
 from pydantic import BaseModel
 from typing import Optional
 from service import orchestrate_interaction, router as voice_router
+from voice_ws import router as voice_ws_router
 import logging
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -26,6 +27,7 @@ app.add_middleware(
 )
 
 app.include_router(voice_router)
+app.include_router(voice_ws_router)
 
 class OrchestratorRequest(BaseModel):
     user_input: str
