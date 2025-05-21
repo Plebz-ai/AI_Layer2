@@ -15,6 +15,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements-base.txt && \
     pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir websockets wsproto && \
     pip show uvicorn || true && pip show websockets || true && pip show wsproto || true
 # Copy only the service code
 COPY orchestrator/. ./

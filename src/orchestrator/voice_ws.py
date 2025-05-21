@@ -48,9 +48,11 @@ received_buffers = {}
 
 @router.websocket("/ws/voice-session")
 async def voice_session_ws(websocket: WebSocket):
+    print("[WS] Connection attempt received", file=sys.stderr)
     await websocket.accept()
     session_id = str(uuid.uuid4())
     logger.info(f"[WS] New voice session: {session_id}")
+    print(f"[WS] New voice session: {session_id}", file=sys.stderr)
     session_data = {
         "id": session_id,
         "state": {},
@@ -61,24 +63,28 @@ async def voice_session_ws(websocket: WebSocket):
         "tts_playing": False,
     }
     await set_session(session_id, {**session_data, "buffer": ""})
-    # Track how many buffers we've dumped for this session
     received_buffers[session_id] = 0
     try:
         # 1. Wait for INIT message with character details
+        print(f"[WS {session_id}] Waiting for INIT message", file=sys.stderr)
         init_msg = await websocket.receive_text()
+        print(f"[WS {session_id}] Received INIT message: {init_msg}", file=sys.stderr)
         try:
             init_data = json.loads(init_msg)
             if init_data.get("type") != MSG_TYPE_INIT or "character_details" not in init_data:
                 raise ValueError("First message must be INIT with character_details")
         except Exception as e:
             logger.error(f"[WS {session_id}] Invalid INIT: {e}")
+            print(f"[WS {session_id}] Invalid INIT: {e}", file=sys.stderr)
             await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"Invalid INIT: {e}"})
             await websocket.close()
+            print(f"[WS {session_id}] Closed due to invalid INIT", file=sys.stderr)
             return
         session = await get_session(session_id)
         session["character_details"] = init_data["character_details"]
         await set_session(session_id, session)
         logger.info(f"[WS {session_id}] Session initialized with character: {init_data['character_details']}")
+        print(f"[WS {session_id}] Session initialized with character: {init_data['character_details']}", file=sys.stderr)
         # 2. Run LLM1 to generate system prompt/context (stub for now)
         llm1_context = f"[SYSTEM_PROMPT for {init_data['character_details'].get('name', 'character')}]"
         session["llm1_context"] = llm1_context
@@ -169,17 +175,21 @@ async def voice_session_ws(websocket: WebSocket):
                                         continue
     except WebSocketDisconnect:
         logger.info(f"[WS {session_id}] Session disconnected (WebSocketDisconnect)")
+        print(f"[WS {session_id}] Session disconnected (WebSocketDisconnect)", file=sys.stderr)
     except Exception as e:
         logger.error(f"[WS {session_id}] Error in session: {e}")
+        print(f"[WS {session_id}] Error in session: {e}", file=sys.stderr)
         try:
             await websocket.send_json({"type": MSG_TYPE_ERROR, "error": str(e)})
         except Exception:
             pass
     finally:
         logger.info(f"[WS {session_id}] Cleaning up session.")
+        print(f"[WS {session_id}] Cleaning up session.", file=sys.stderr)
         await delete_session(session_id)
         if websocket.application_state != WebSocketState.DISCONNECTED:
             try:
                 await websocket.close()
+                print(f"[WS {session_id}] WebSocket closed in finally block", file=sys.stderr)
             except Exception:
                 pass 
