@@ -1,7 +1,7 @@
 import json
 import logging
 import uuid
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 from starlette.websockets import WebSocketState
 import base64
 import httpx
@@ -45,6 +45,15 @@ print("[STARTUP] voice_ws.py loaded", file=sys.stderr)
 # Add buffer dump state
 DUMP_LIMIT = 5
 received_buffers = {}
+
+@router.on_event("startup")
+async def startup_event():
+    print("[ORCH] Orchestrator started and listening for WebSocket connections on /ws/voice-session", file=sys.stderr)
+
+@router.get("/ws/voice-session")
+async def ws_voice_session_catchall(request: Request):
+    print(f"[ORCH] Received non-WebSocket request to /ws/voice-session: method={request.method}, headers={dict(request.headers)}", file=sys.stderr)
+    return {"error": "This endpoint only supports WebSocket connections."}
 
 @router.websocket("/ws/voice-session")
 async def voice_session_ws(websocket: WebSocket):

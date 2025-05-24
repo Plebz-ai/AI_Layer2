@@ -23,6 +23,7 @@ COPY speech ./speech
 COPY utils ./utils
 ENV PYTHONPATH=/app:/app/..
 ENV CUDA_VISIBLE_DEVICES=""
+ENV REDIS_URL=redis://redis:6379/0
 EXPOSE 8010
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8010"]
 HEALTHCHECK CMD curl --fail http://localhost:8010/health || exit 1 
