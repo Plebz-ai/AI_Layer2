@@ -3,6 +3,7 @@ import json
 import os
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+print(f"[DEBUG] REDIS_URL read from environment: {REDIS_URL}")
 
 async def get_redis():
     return await redis.from_url(REDIS_URL, decode_responses=True)
