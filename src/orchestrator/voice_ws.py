@@ -181,7 +181,6 @@ async def voice_session_ws(websocket: WebSocket):
                                             await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"STT streaming exception: {e}"})
                                         audio_buffer = bytearray()
                                         await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": False})
-                                        continue
     except WebSocketDisconnect:
         logger.info(f"[WS {session_id}] Session disconnected (WebSocketDisconnect)")
         print(f"[WS {session_id}] Session disconnected (WebSocketDisconnect)", file=sys.stderr)
