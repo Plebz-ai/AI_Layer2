@@ -30,7 +30,7 @@ async def stream_speech_to_text_endpoint(request: Request):
         async for chunk in request.stream():
             yield chunk
 
-    async def stream_deepgram(audio_chunks):
+    def stream_deepgram(audio_chunks):
         options = LiveOptions(
             model="nova-3",
             punctuate=True,
@@ -42,29 +42,36 @@ async def stream_speech_to_text_endpoint(request: Request):
             utterance_end_ms=300,
         )
         queue = asyncio.Queue()
+        loop = asyncio.get_event_loop()
+        dg_connection = deepgram.listen.websocket.v("1")
 
-        async def on_transcript(event):
+        def on_transcript(event):
             transcript = event.channel.alternatives[0].transcript
             if transcript:
                 print(f"[Deepgram Transcript @ {time.time():.3f}] {transcript}")
-                await queue.put((transcript + "\n").encode("utf-8"))
+                loop.call_soon_threadsafe(queue.put_nowait, (transcript + "\n").encode("utf-8"))
 
-        async with deepgram.listen.live.v("1") as dg_connection:
-            dg_connection.on(LiveTranscriptionEvents.Transcript, on_transcript)
-            await dg_connection.start(options)
+        dg_connection.on(LiveTranscriptionEvents.Transcript, on_transcript)
+        dg_connection.start(options)
 
-            async def sender():
-                async for chunk in audio_chunks:
-                    await dg_connection.send(chunk)
-                await dg_connection.finish()
+        async def sender():
+            async for chunk in audio_chunks:
+                dg_connection.send(chunk)
+            dg_connection.finish()
 
-            sender_task = asyncio.create_task(sender())
-            while True:
-                item = await queue.get()
+        # Start sender as a background task
+        asyncio.create_task(sender())
+
+        # Poll the queue for new transcripts
+        while True:
+            try:
+                item = queue.get_nowait()
                 if item is None:
                     break
                 yield item
-            await sender_task
+            except asyncio.QueueEmpty:
+                time.sleep(0.01)
+                continue
 
     return StreamingResponse(stream_deepgram(audio_stream_consumer()), media_type="text/plain")
 
