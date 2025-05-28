@@ -4,7 +4,7 @@ import logging
 import jwt
 import time
 from livekit import rtc
-from service import stream_deepgram, generate_response
+from service import generate_response
 import torch
 from silero_vad import VoiceActivityDetector, read_audio
 import websockets

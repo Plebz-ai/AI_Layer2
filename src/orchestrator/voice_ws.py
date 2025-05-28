@@ -115,7 +115,7 @@ async def voice_session_ws(websocket: WebSocket):
             while True:
                 try:
                     msg = await websocket.receive()
-                    print(f"[WS {session_id}] Received message in main loop: {{msg}}", file=sys.stderr)
+                    # print(f"[WS {session_id}] Received message in main loop: {{msg}}", file=sys.stderr)  # Commented out to reduce log size
                 except Exception as e:
                     logger.error(f"[WS {session_id}] Error receiving message: {e}")
                     break
@@ -144,7 +144,8 @@ async def voice_session_ws(websocket: WebSocket):
                             rms = np.sqrt(np.mean(pcm.astype(np.float32) ** 2)) if pcm.size > 0 else 0
                             try:
                                 speech_detected = is_speech(bytes(vad_chunk))
-                                logger.info(f"[WS {session_id}] VAD frame: len={len(vad_chunk)}, RMS={rms:.2f}, speech_detected={speech_detected}")
+                                # logger.info(f"[WS {session_id}] VAD frame: len={len(vad_chunk)}, RMS={rms:.2f}, speech_detected={speech_detected}")  # Commented out to reduce log size
+                                # print(f"[WS {session_id}] VAD frame: len={len(vad_chunk)}, RMS={rms:.2f}, speech_detected={speech_detected}", file=sys.stderr)  # Already commented out
                             except Exception as e:
                                 logger.error(f"[WS {session_id}] VAD error on 960-byte frame: {e}")
                                 await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"VAD error: {e}"})
@@ -193,6 +194,32 @@ async def voice_session_ws(websocket: WebSocket):
                                                         transcript += chunk
                                                         await websocket.send_json({"type": MSG_TYPE_TRANSCRIPT_PARTIAL, "text": transcript})
                                                     await websocket.send_json({"type": MSG_TYPE_TRANSCRIPT_FINAL, "text": transcript})
+                                                    # --- LLM2 + TTS PIPELINE ---
+                                                    if transcript.strip():
+                                                        # Call LLM2
+                                                        llm2_payload = {
+                                                            "user_query": transcript,
+                                                            "persona_context": session.get("llm1_context", "You are a helpful AI assistant."),
+                                                            "rules": {},
+                                                            "model": os.getenv("AZURE_GPT4O_MINI_DEPLOYMENT", "gpt-4o-mini")
+                                                        }
+                                                        try:
+                                                            llm2_resp = await client.post(LLM2_URL, json=llm2_payload, headers={"x-internal-api-key": INTERNAL_API_KEY})
+                                                            llm2_data = llm2_resp.json()
+                                                            ai_text = llm2_data.get("response", "")
+                                                            await websocket.send_json({"type": MSG_TYPE_LLM2_FINAL, "text": ai_text})
+                                                            # Call TTS
+                                                            tts_payload = {
+                                                                "text": ai_text,
+                                                                "voice_type": session["character_details"].get("voice_type", "predefined")
+                                                            }
+                                                            async with client.stream("POST", TTS_STREAM_URL, json=tts_payload, headers={"x-internal-api-key": INTERNAL_API_KEY}) as tts_resp:
+                                                                async for tts_chunk in tts_resp.aiter_bytes():
+                                                                    await websocket.send_bytes(tts_chunk)
+                                                                await websocket.send_json({"type": MSG_TYPE_TTS_END})
+                                                        except Exception as e:
+                                                            logger.error(f"[WS {session_id}] LLM2 or TTS pipeline error: {e}")
+                                                            await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"LLM2 or TTS pipeline error: {e}"})
                                             except Exception as e:
                                                 logger.error(f"[WS {session_id}] STT streaming exception: {e}")
                                                 await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"STT streaming exception: {e}"})
