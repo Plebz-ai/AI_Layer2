@@ -181,43 +181,40 @@ async def voice_session_ws(websocket: WebSocket):
                                             stt_payload = {"audio_data": audio_b64}
                                             logger.info(f"[WS {session_id}] STT request payload: {json.dumps(stt_payload)[:500]}...")
                                             try:
-                                                async def audio_stream():
-                                                    yield base64.b64decode(audio_b64)
-                                                async with client.stream("POST", STT_STREAM_URL, content=audio_stream(), headers={"x-internal-api-key": INTERNAL_API_KEY, "Content-Type": "application/octet-stream"}, timeout=30) as stt_resp:
-                                                    logger.info(f"[WS {session_id}] STT response code: {stt_resp.status_code}")
-                                                    transcript = ""
-                                                    async for chunk in stt_resp.aiter_text():
-                                                        transcript += chunk
-                                                        await websocket.send_json({"type": MSG_TYPE_TRANSCRIPT_PARTIAL, "text": transcript})
-                                                    await websocket.send_json({"type": MSG_TYPE_TRANSCRIPT_FINAL, "text": transcript})
-                                                    # --- LLM2 + TTS PIPELINE ---
-                                                    if transcript.strip():
-                                                        print(f"[ORCH] Forwarding transcript to LLM2 @ {time.time():.3f}: {transcript}")
-                                                        llm2_payload = {
-                                                            "user_query": transcript,
-                                                            "persona_context": session.get("llm1_context", "You are a helpful AI assistant."),
-                                                            "rules": {},
-                                                            "model": os.getenv("AZURE_GPT4O_MINI_DEPLOYMENT", "gpt-4o-mini")
+                                                # Always send JSON with base64 audio_data
+                                                stt_headers = {"x-internal-api-key": INTERNAL_API_KEY, "Content-Type": "application/json"}
+                                                stt_resp = await client.post(STT_STREAM_URL, json=stt_payload, headers=stt_headers, timeout=30)
+                                                logger.info(f"[WS {session_id}] STT response code: {stt_resp.status_code}")
+                                                transcript = stt_resp.text
+                                                await websocket.send_json({"type": MSG_TYPE_TRANSCRIPT_FINAL, "text": transcript})
+                                                # --- LLM2 + TTS PIPELINE ---
+                                                if transcript.strip():
+                                                    print(f"[ORCH] Forwarding transcript to LLM2 @ {time.time():.3f}: {transcript}")
+                                                    llm2_payload = {
+                                                        "user_query": transcript,
+                                                        "persona_context": session.get("llm1_context", "You are a helpful AI assistant."),
+                                                        "rules": {},
+                                                        "model": os.getenv("AZURE_GPT4O_MINI_DEPLOYMENT", "gpt-4o-mini")
+                                                    }
+                                                    try:
+                                                        llm2_start = time.time()
+                                                        llm2_resp = await client.post(LLM2_URL, json=llm2_payload, headers={"x-internal-api-key": INTERNAL_API_KEY})
+                                                        llm2_data = llm2_resp.json()
+                                                        ai_text = llm2_data.get("response", "")
+                                                        print(f"[ORCH] LLM2 response @ {time.time():.3f} (latency: {time.time()-llm2_start:.3f}s): {ai_text}")
+                                                        await websocket.send_json({"type": MSG_TYPE_LLM2_FINAL, "text": ai_text})
+                                                        # Call TTS
+                                                        tts_payload = {
+                                                            "text": ai_text,
+                                                            "voice_type": session["character_details"].get("voice_type", "predefined")
                                                         }
-                                                        try:
-                                                            llm2_start = time.time()
-                                                            llm2_resp = await client.post(LLM2_URL, json=llm2_payload, headers={"x-internal-api-key": INTERNAL_API_KEY})
-                                                            llm2_data = llm2_resp.json()
-                                                            ai_text = llm2_data.get("response", "")
-                                                            print(f"[ORCH] LLM2 response @ {time.time():.3f} (latency: {time.time()-llm2_start:.3f}s): {ai_text}")
-                                                            await websocket.send_json({"type": MSG_TYPE_LLM2_FINAL, "text": ai_text})
-                                                            # Call TTS
-                                                            tts_payload = {
-                                                                "text": ai_text,
-                                                                "voice_type": session["character_details"].get("voice_type", "predefined")
-                                                            }
-                                                            async with client.stream("POST", TTS_STREAM_URL, json=tts_payload, headers={"x-internal-api-key": INTERNAL_API_KEY}) as tts_resp:
-                                                                async for tts_chunk in tts_resp.aiter_bytes():
-                                                                    await websocket.send_bytes(tts_chunk)
-                                                                await websocket.send_json({"type": MSG_TYPE_TTS_END})
-                                                        except Exception as e:
-                                                            logger.error(f"[WS {session_id}] LLM2 or TTS pipeline error: {e}")
-                                                            await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"LLM2 or TTS pipeline error: {e}"})
+                                                        async with client.stream("POST", TTS_STREAM_URL, json=tts_payload, headers={"x-internal-api-key": INTERNAL_API_KEY}) as tts_resp:
+                                                            async for tts_chunk in tts_resp.aiter_bytes():
+                                                                await websocket.send_bytes(tts_chunk)
+                                                            await websocket.send_json({"type": MSG_TYPE_TTS_END})
+                                                    except Exception as e:
+                                                        logger.error(f"[WS {session_id}] LLM2 or TTS pipeline error: {e}")
+                                                        await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"LLM2 or TTS pipeline error: {e}"})
                                             except Exception as e:
                                                 logger.error(f"[WS {session_id}] STT streaming exception: {e}")
                                                 await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"STT streaming exception: {e}"})

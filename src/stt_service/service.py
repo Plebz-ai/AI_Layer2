@@ -98,12 +98,20 @@ async def deepgram_stream(audio_chunks):
 @app.post("/stream-speech-to-text")
 async def stream_speech_to_text(request: Request):
     body = await request.body()
+    content_type = request.headers.get("content-type", "")
+    logger.info(f"[STT] Incoming /stream-speech-to-text content-type: {content_type}")
     # If base64, decode
     try:
         data = json.loads(body)
+        logger.info("[STT] Request is JSON, decoding base64 audio_data.")
         audio_data = base64.b64decode(data["audio_data"])
     except Exception:
-        audio_data = body
+        if isinstance(body, (bytes, bytearray)):
+            logger.info("[STT] Request is raw PCM bytes.")
+            audio_data = body
+        else:
+            logger.warning(f"[STT] Request body is not JSON and not bytes: type={type(body)}")
+            audio_data = b""
 
     # Audio format validation and logging
     logger.info(f"[STT] First 32 bytes of audio: {audio_data[:32]}")
