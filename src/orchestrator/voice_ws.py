@@ -123,8 +123,61 @@ async def voice_session_ws(websocket: WebSocket):
                     try:
                         data = json.loads(stt_msg)
                         if data.get("type") == "transcript":
-                            await websocket.send_json({"type": MSG_TYPE_TRANSCRIPT_FINAL, "text": data["text"]})
-                            logger.info(f"[WS {session_id}] Forwarded transcript to frontend: {data['text']}")
+                            transcript = data["text"]
+                            await websocket.send_json({"type": MSG_TYPE_TRANSCRIPT_FINAL, "text": transcript})
+                            logger.info(f"[WS {session_id}] Forwarded transcript to frontend: {transcript}")
+
+                            # --- NEW: Call LLM2 for a response ---
+                            session = await get_session(session_id)
+                            character_details = session.get("character_details", {})
+                            history = session.get("history", [])
+                            persona_context = session.get("llm1_context", "")
+                            llm2_payload = {
+                                "user_query": transcript,
+                                "persona_context": persona_context,
+                                "rules": {},  # TODO: fill with actual rules if available
+                                "model": "gpt-4o-mini"
+                            }
+                            try:
+                                async with httpx.AsyncClient() as client:
+                                    resp = await client.post(
+                                        LLM2_URL,
+                                        json=llm2_payload,
+                                        headers={"x-internal-api-key": INTERNAL_API_KEY}
+                                    )
+                                    llm2_response = resp.json().get("response", "")
+                            except Exception as e:
+                                logger.error(f"[WS {session_id}] Error calling LLM2: {e}")
+                                llm2_response = "[Error: LLM2 unavailable]"
+                            # Update history
+                            history.append({"role": "user", "content": transcript})
+                            history.append({"role": "assistant", "content": llm2_response})
+                            session["history"] = history
+                            await set_session(session_id, session)
+                            # Send LLM2 response to frontend
+                            await websocket.send_json({"type": MSG_TYPE_LLM2_FINAL, "text": llm2_response})
+                            logger.info(f"[WS {session_id}] Forwarded LLM2 response to frontend: {llm2_response}")
+
+                            # --- NEW: Stream TTS audio to frontend ---
+                            try:
+                                async with httpx.AsyncClient(timeout=None) as client:
+                                    tts_headers = {"x-internal-api-key": INTERNAL_API_KEY}
+                                    tts_payload = {"text": llm2_response}
+                                    tts_url = TTS_STREAM_URL
+                                    async with client.stream("POST", tts_url, headers=tts_headers, json=tts_payload) as tts_resp:
+                                        if tts_resp.status_code != 200:
+                                            error_body = await tts_resp.aread()
+                                            logger.error(f"[WS {session_id}] TTS error: {tts_resp.status_code} {error_body.decode(errors='ignore')}")
+                                            await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"TTS error: {tts_resp.status_code}"})
+                                        else:
+                                            async for chunk in tts_resp.aiter_bytes():
+                                                if chunk:
+                                                    await websocket.send_bytes(json.dumps({"type": MSG_TYPE_TTS_CHUNK, "audio": base64.b64encode(chunk).decode()} ).encode())
+                                            await websocket.send_json({"type": MSG_TYPE_TTS_END})
+                                            logger.info(f"[WS {session_id}] Streamed TTS audio to frontend.")
+                            except Exception as e:
+                                logger.error(f"[WS {session_id}] Error streaming TTS audio: {e}")
+                                await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"TTS streaming error: {e}"})
                         else:
                             await websocket.send_json(data)
                     except Exception as e:
