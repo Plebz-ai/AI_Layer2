@@ -11,6 +11,7 @@ from utils.redis_session import get_session, set_session, delete_session
 from speech.vad import is_speech
 import sys
 import numpy as np
+import time
 
 router = APIRouter()
 logger = logging.getLogger("voice_ws")
@@ -196,6 +197,7 @@ async def voice_session_ws(websocket: WebSocket):
                                                     await websocket.send_json({"type": MSG_TYPE_TRANSCRIPT_FINAL, "text": transcript})
                                                     # --- LLM2 + TTS PIPELINE ---
                                                     if transcript.strip():
+                                                        print(f"[ORCH] Forwarding transcript to LLM2 @ {time.time():.3f}: {transcript}")
                                                         # Call LLM2
                                                         llm2_payload = {
                                                             "user_query": transcript,
@@ -204,9 +206,11 @@ async def voice_session_ws(websocket: WebSocket):
                                                             "model": os.getenv("AZURE_GPT4O_MINI_DEPLOYMENT", "gpt-4o-mini")
                                                         }
                                                         try:
+                                                            llm2_start = time.time()
                                                             llm2_resp = await client.post(LLM2_URL, json=llm2_payload, headers={"x-internal-api-key": INTERNAL_API_KEY})
                                                             llm2_data = llm2_resp.json()
                                                             ai_text = llm2_data.get("response", "")
+                                                            print(f"[ORCH] LLM2 response @ {time.time():.3f} (latency: {time.time()-llm2_start:.3f}s): {ai_text}")
                                                             await websocket.send_json({"type": MSG_TYPE_LLM2_FINAL, "text": ai_text})
                                                             # Call TTS
                                                             tts_payload = {

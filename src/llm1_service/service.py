@@ -32,47 +32,40 @@ logging.info(f"[LLM1] GPT41_MINI_API_VERSION={GPT41_MINI_API_VERSION}")
 
 async def generate_context(user_input: str, character_details: dict, session_id: str = None, history: list = None, temperature: float = 0.7, top_p: float = 0.95):
     name = character_details.get("name", "Character")
-    persona = character_details.get("persona", character_details.get("personality", "friendly"))
-    description = character_details.get("description", "")
-    voice_type = character_details.get("voice_type", "")
-    avatar_url = character_details.get("avatar_url", "")
-    logging.info(f"[LLM1] generate_context called with session_id={session_id}, user_input={user_input}, character_details={character_details}, history={history}")
-    prompt = (
-        f"You are {name}, {persona}. {description}\n"
-        f"Voice: {voice_type}\nAvatar: {avatar_url}\n"
-        f"User: {user_input}"
-    )
+    persona = character_details.get("personality", "default persona")
+    voice_type = character_details.get("voice_type", "predefined")
+    prompt = f"You are {name}. {character_details.get('description', '')} Your personality traits are: {persona}. Respond in character, being concise and engaging."
     max_retries = 5
     for attempt in range(max_retries):
         try:
-            response = await client.chat.completions.create(
-                messages=[
+            response_params = {
+                "messages": [
                     {"role": "system", "content": "You are a friendly, concise conversational partner. Always reply in 1-2 sentences, like a real human chat. Avoid long or formal responses."},
                     {"role": "user", "content": prompt}
                 ],
-                max_completion_tokens=64,  # Lowered for concise context
-                temperature=0.7,
-                top_p=top_p,
-                model=GPT41_MINI_DEPLOYMENT,
-            )
-            # Log rate limit headers if present
-            if hasattr(response, 'headers'):
-                rl_headers = {k: v for k, v in response.headers.items() if 'ratelimit' in k.lower()}
-                logging.info(f"[LLM1] Rate limit headers: {rl_headers}")
-            logging.info(f"[LLM1] OpenAI API raw response: {response}")
-            if not hasattr(response, 'choices') or not response.choices or not hasattr(response.choices[0], 'message'):
-                logging.error(f"[LLM1] OpenAI API returned unexpected response: {response}")
-                return {"context": "fallback-context", "rules": {}, "error": "OpenAI API returned unexpected response format."}
-            context = response.choices[0].message.content
+                "max_completion_tokens": 64,  # Lowered for concise context
+                "temperature": 0.7,
+                "top_p": top_p,
+                "model": GPT41_MINI_DEPLOYMENT,
+                "stream": True,
+            }
+            start_time = asyncio.get_event_loop().time()
+            response_stream = await client.chat.completions.create(**response_params)
+            full_context = ""
+            async for chunk in response_stream:
+                delta = getattr(chunk.choices[0], 'delta', None)
+                if delta and hasattr(delta, 'content') and delta.content:
+                    full_context += delta.content
+                    logging.info(f"[LLM1] [stream] Partial: {repr(full_context)} @ {asyncio.get_event_loop().time() - start_time:.3f}s")
+            logging.info(f"[LLM1] [stream] Final: {repr(full_context)} @ {asyncio.get_event_loop().time() - start_time:.3f}s")
             rules = {
                 "persona": persona,
                 "style": character_details.get("style", "default"),
                 "forbidden_topics": character_details.get("forbidden_topics", []),
                 "voice_type": voice_type,
             }
-            return {"context": context, "rules": rules}
+            return {"context": full_context, "rules": rules}
         except Exception as e:
-            # Check for Retry-After header in the exception if available
             wait_time = None
             retry_after = None
             if hasattr(e, 'response') and hasattr(e.response, 'headers'):
