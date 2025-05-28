@@ -8,7 +8,8 @@ COPY ../../requirements.txt ./
 # Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements-base.txt && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip list
 # Copy only the service code
 COPY . .
 ENV PYTHONPATH=/app
