@@ -11,3 +11,5 @@ httpx==0.27.2  # Pin to 0.27.2 to avoid 'proxies' argument error
 livekit==1.0.0
 pyjwt==2.8.0
 webrtcvad-wheels==2.0.14  # For streaming VAD, replaces silero-vad
+websockets>=10.0
+deepgram-sdk
