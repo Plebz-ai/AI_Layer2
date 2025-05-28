@@ -4,9 +4,10 @@ import os
 import asyncio
 import logging
 import time
+import json
 from fastapi import FastAPI, Request, APIRouter
 from starlette.responses import StreamingResponse
-from deepgram import DeepgramClient, LiveOptions, LiveTranscriptionEvents
+import websockets
 
 logger = logging.getLogger("stt_service")
 
@@ -18,7 +19,7 @@ if not DEEPGRAM_API_KEY:
     logger.fatal("DEEPGRAM_API_KEY not set! Please set it in your .env file.")
     raise RuntimeError("DEEPGRAM_API_KEY not set!")
 
-deepgram = DeepgramClient(DEEPGRAM_API_KEY)
+DEEPGRAM_URL = "wss://api.deepgram.com/v1/listen"
 
 @router.get("/health")
 async def health_check():
@@ -30,48 +31,39 @@ async def stream_speech_to_text_endpoint(request: Request):
         async for chunk in request.stream():
             yield chunk
 
-    def stream_deepgram(audio_chunks):
-        options = LiveOptions(
-            model="nova-3",
-            punctuate=True,
-            language="en-US",
-            encoding="linear16",
-            channels=1,
-            sample_rate=16000,
-            interim_results=True,
-            utterance_end_ms=300,
-        )
-        queue = asyncio.Queue()
-        loop = asyncio.get_event_loop()
-        dg_connection = deepgram.listen.websocket.v("1")
-
-        def on_transcript(event):
-            transcript = event.channel.alternatives[0].transcript
-            if transcript:
-                print(f"[Deepgram Transcript @ {time.time():.3f}] {transcript}")
-                loop.call_soon_threadsafe(queue.put_nowait, (transcript + "\n").encode("utf-8"))
-
-        dg_connection.on(LiveTranscriptionEvents.Transcript, on_transcript)
-        dg_connection.start(options)
-
-        async def sender():
-            async for chunk in audio_chunks:
-                dg_connection.send(chunk)
-            dg_connection.finish()
-
-        # Start sender as a background task
-        asyncio.create_task(sender())
-
-        # Poll the queue for new transcripts
-        while True:
-            try:
-                item = queue.get_nowait()
-                if item is None:
-                    break
-                yield item
-            except asyncio.QueueEmpty:
-                time.sleep(0.01)
-                continue
+    async def stream_deepgram(audio_chunks):
+        headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
+        params = {
+            "model": "nova-3",
+            "punctuate": "true",
+            "language": "en-US",
+            "encoding": "linear16",
+            "channels": "1",
+            "sample_rate": "16000",
+            "interim_results": "true",
+            "utterance_end_ms": "300",
+        }
+        url = DEEPGRAM_URL + "?" + "&".join(f"{k}={v}" for k, v in params.items())
+        try:
+            async with websockets.connect(url, extra_headers=headers) as ws:
+                async def sender():
+                    async for chunk in audio_chunks:
+                        await ws.send(chunk)
+                    await ws.send(b"")  # Signal end of stream
+                sender_task = asyncio.create_task(sender())
+                try:
+                    async for msg in ws:
+                        data = json.loads(msg)
+                        transcript = data.get("channel", {}).get("alternatives", [{}])[0].get("transcript", "")
+                        if transcript:
+                            print(f"[Deepgram Transcript @ {time.time():.3f}] {transcript}")
+                            yield (transcript + "\n").encode("utf-8")
+                except websockets.ConnectionClosed:
+                    pass
+                await sender_task
+        except Exception as e:
+            logger.error(f"Deepgram websocket connection failed: {e}")
+            yield b"[ERROR] Deepgram connection failed.\n"
 
     return StreamingResponse(stream_deepgram(audio_stream_consumer()), media_type="text/plain")
 
