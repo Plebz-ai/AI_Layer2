@@ -53,6 +53,8 @@ async def generate_context(user_input: str, character_details: dict, session_id:
             response_stream = await client.chat.completions.create(**response_params)
             full_context = ""
             async for chunk in response_stream:
+                if not chunk.choices or len(chunk.choices) == 0:
+                    continue
                 delta = getattr(chunk.choices[0], 'delta', None)
                 if delta and hasattr(delta, 'content') and delta.content:
                     full_context += delta.content
