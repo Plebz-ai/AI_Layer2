@@ -117,7 +117,7 @@ async def voice_session_ws(websocket: WebSocket):
                     if msg["type"] == "websocket.receive" and "bytes" in msg:
                         audio_chunk = msg["bytes"]
                         await stt_ws.send(audio_chunk)
-                        logger.info(f"[WS {session_id}] Forwarded {len(audio_chunk)} bytes to STT WS")
+                        # logger.info(f"[WS {session_id}] Forwarded {len(audio_chunk)} bytes to STT WS")
             async def stt_to_frontend():
                 async for stt_msg in stt_ws:
                     try:
