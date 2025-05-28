@@ -1,74 +1,76 @@
 # TTS Service Logic (Text to Speech)
 
-import base64
 import os
+import logging
 import httpx
-import asyncio
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-VOICE_CONFIGS = {
-    "male": {
-        "model_id": os.getenv("ELEVENLABS_TTS_MODEL_ID_MALE"),
-        "voice_id": os.getenv("ELEVENLABS_VOICE_ID_MALE"),
-    },
-    "female": {
-        "model_id": os.getenv("ELEVENLABS_TTS_MODEL_ID_FEMALE"),
-        "voice_id": os.getenv("ELEVENLABS_VOICE_ID_FEMALE"),
-    },
-    "predefined": {
-        "model_id": os.getenv("ELEVENLABS_TTS_MODEL_ID_PREDEFINED"),
-        "voice_id": os.getenv("ELEVENLABS_VOICE_ID_PREDEFINED"),
-    },
-    # Add more voices as needed
-}
+# --- CONFIG ---
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
+# Use a free ElevenLabs voice (Rachel, voice_id: 21m00Tcm4TlvDq8ikWAM)
+ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Rachel (free)
+ELEVENLABS_MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+ELEVENLABS_URL = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream"
 
-# Simulate preheating: pool of HTTP clients
-PREHEAT_POOL_SIZE = 3
-preheated_clients = [httpx.AsyncClient() for _ in range(PREHEAT_POOL_SIZE)]
+app = FastAPI()
+logger = logging.getLogger("tts_service")
+logging.basicConfig(level=logging.INFO)
 
-def get_voice_config(voice_type: str):
-    config = VOICE_CONFIGS.get(voice_type)
-    if not config or not config["model_id"] or not config["voice_id"]:
-        raise ValueError(f"Invalid or missing TTS config for voice_type '{voice_type}'")
-    return config
-
-async def text_to_speech(text: str, voice_type: str = "predefined"):
-    config = get_voice_config(voice_type)
-    model_id = config["model_id"]
-    voice_id = config["voice_id"]
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    headers = {"xi-api-key": ELEVENLABS_API_KEY}
+async def elevenlabs_stream(text: str):
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg",
+    }
     payload = {
         "text": text,
-        "model_id": model_id,
-        "voice_settings": {"stability": 0.5, "similarity_boost": 0.5}
+        "model_id": ELEVENLABS_MODEL_ID,
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.5},
     }
-    client = preheated_clients[hash(text) % PREHEAT_POOL_SIZE]
     try:
-        resp = await client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        return resp.content  # Return audio bytes
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("POST", ELEVENLABS_URL, headers=headers, json=payload) as resp:
+                if resp.status_code != 200:
+                    error_body = await resp.aread()
+                    logger.error(f"TTS error: {resp.status_code} {error_body.decode(errors='ignore')}")
+                    if b'free_users_not_allowed' in error_body:
+                        logger.error("The selected ElevenLabs voice is not available for free users. Please use a free voice.")
+                    yield b""
+                    return
+                async for chunk in resp.aiter_bytes():
+                    yield chunk
     except Exception as e:
-        import logging
-        logging.error(f"TTS error for voice_type={voice_type}, model_id={model_id}, voice_id={voice_id}: {e}")
-        # Return a short silent WAV as fallback (1 second of silence, 16kHz mono)
-        import wave, io
-        buf = io.BytesIO()
-        with wave.open(buf, 'wb') as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(16000)
-            wf.writeframes(b'\x00\x00' * 16000)
-        return buf.getvalue()
+        logger.error(f"ElevenLabs TTS connection failed: {e}")
+        yield b""
 
-async def stream_text_to_speech(text: str, voice_type: str = "predefined"):
-    audio = await text_to_speech(text, voice_type)
-    chunk_size = 1024
-    for i in range(0, len(audio), chunk_size):
-        yield audio[i:i+chunk_size]
+@app.post("/stream-text-to-speech")
+async def stream_text_to_speech(request: Request):
+    data = await request.json()
+    text = data.get("text", "")
+    if not text:
+        return Response(content=b"", status_code=400)
+    return StreamingResponse(elevenlabs_stream(text), media_type="audio/mpeg")
 
-def text_to_speech_base64(text: str, voice_name: str = "en-US-JennyNeural"):
-    # Simulate TTS by returning a dummy base64 string
-    dummy_audio = b"audio-bytes"
-    audio_b64 = base64.b64encode(dummy_audio).decode("utf-8")
-    return audio_b64 
+@app.websocket("/ws/stream-text-to-speech")
+async def websocket_text_to_speech(ws: WebSocket):
+    await ws.accept()
+    logger.info("[TTS WS] Client connected")
+    try:
+        while True:
+            try:
+                data = await ws.receive_text()
+            except WebSocketDisconnect:
+                logger.info("[TTS WS] Client disconnected")
+                break
+            except Exception as e:
+                logger.error(f"[TTS WS] Receive error: {e}")
+                break
+            # Stream to ElevenLabs
+            async for chunk in elevenlabs_stream(data):
+                await ws.send_bytes(chunk)
+    except Exception as e:
+        logger.error(f"[TTS WS] Unexpected error: {e}")
+    finally:
+        await ws.close()
+        logger.info("[TTS WS] Connection closed") 

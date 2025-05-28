@@ -1,15 +1,12 @@
 from dotenv import load_dotenv
 import os
 import sys
-from fastapi import FastAPI, Request, Response, HTTPException, Header, Depends
-from pydantic import BaseModel
-from service import text_to_speech, stream_text_to_speech, get_voice_config
+from fastapi import FastAPI, Request, Response, HTTPException, Header, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
-import asyncio
-import base64
 import logging
 import time
 import uuid
+from service import elevenlabs_stream
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tts_service")
@@ -31,60 +28,18 @@ VAD_STT_ONLY = os.getenv("VAD_STT_ONLY", "0") == "1"
 LLM_ONLY = os.getenv("LLM_ONLY", "0") == "1"
 print(f"[TTS_SERVICE] TTS_ONLY={TTS_ONLY}, VAD_STT_ONLY={VAD_STT_ONLY}, LLM_ONLY={LLM_ONLY}", flush=True)
 
-class TTSRequest(BaseModel):
-    text: str
-    voice_type: str = "predefined"  # male, female, predefined
-
-class TTSResponse(BaseModel):
-    audio_data: str  # base64-encoded audio
-
 async def verify_internal_api_key(x_internal_api_key: str = Header(...)):
     if x_internal_api_key != INTERNAL_API_KEY:
         logger.error(f"[TTS] Invalid or missing internal API key: {x_internal_api_key}")
         raise HTTPException(status_code=403, detail="Forbidden: invalid internal API key")
 
-@app.post("/text-to-speech", response_model=TTSResponse, dependencies=[Depends(verify_internal_api_key)])
-async def text_to_speech_endpoint(req: TTSRequest, request: Request):
-    request_id = getattr(request.state, 'request_id', 'unknown')
-    logger.info(f"[request_id={request_id}] /text-to-speech payload: text length={len(req.text)}, voice_type={req.voice_type}")
-    if not os.getenv("ELEVENLABS_API_KEY"):
-        logger.warning(f"[request_id={request_id}] /text-to-speech called but ELEVENLABS_API_KEY is missing!")
-    try:
-        # Validate voice_type/model_id/voice_id
-        try:
-            get_voice_config(req.voice_type)
-        except Exception as e:
-            logger.error(f"[request_id={request_id}] Invalid TTS config: {e}")
-            raise HTTPException(status_code=400, detail=str(e))
-        audio_bytes = await text_to_speech(req.text, req.voice_type)
-        logger.info(f"[request_id={request_id}] /text-to-speech response: audio bytes length={len(audio_bytes)}")
-        audio_data = base64.b64encode(audio_bytes).decode("utf-8")
-        return TTSResponse(audio_data=audio_data)
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        logger.error(f"[request_id={request_id}] TTS error: {e}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.post("/stream-text-to-speech", dependencies=[Depends(verify_internal_api_key)])
-async def stream_text_to_speech_endpoint(req: TTSRequest):
-    try:
-        try:
-            get_voice_config(req.voice_type)
-        except Exception as e:
-            logger.error(f"Invalid TTS config: {e}")
-            raise HTTPException(status_code=400, detail=str(e))
-        async def audio_stream():
-            async for chunk in stream_text_to_speech(req.text, req.voice_type):
-                yield base64.b64encode(chunk).decode("utf-8")
-                await asyncio.sleep(0.01)
-        return StreamingResponse(audio_stream(), media_type="text/plain")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"TTS streaming error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+async def stream_text_to_speech_endpoint(request: Request):
+    data = await request.json()
+    text = data.get("text", "")
+    if not text:
+        return Response(content=b"", status_code=400)
+    return StreamingResponse(elevenlabs_stream(text), media_type="audio/mpeg")
 
 @app.get("/health")
 async def health():
@@ -108,3 +63,26 @@ async def log_requests(request: Request, call_next):
         import traceback
         logger.error(f"[request_id={request_id}] Error: {e}\n{traceback.format_exc()}")
         raise 
+
+@app.websocket("/ws/stream-text-to-speech")
+async def websocket_text_to_speech(ws: WebSocket):
+    await ws.accept()
+    logger.info("[TTS WS] Client connected")
+    try:
+        while True:
+            try:
+                data = await ws.receive_text()
+            except WebSocketDisconnect:
+                logger.info("[TTS WS] Client disconnected")
+                break
+            except Exception as e:
+                logger.error(f"[TTS WS] Receive error: {e}")
+                break
+            # Stream to ElevenLabs
+            async for chunk in elevenlabs_stream(data):
+                await ws.send_bytes(chunk)
+    except Exception as e:
+        logger.error(f"[TTS WS] Unexpected error: {e}")
+    finally:
+        await ws.close()
+        logger.info("[TTS WS] Connection closed") 

@@ -12,3 +12,4 @@ livekit==1.0.0
 pyjwt==2.8.0
 webrtcvad-wheels==2.0.14  # For streaming VAD, replaces silero-vad 
 deepgram-sdk==3.2.0
+websockets==15.0.1

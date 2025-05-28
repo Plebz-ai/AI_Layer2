@@ -5,7 +5,7 @@ import time
 import uuid
 from fastapi import Request, Response, HTTPException, Header, Depends
 from pydantic import BaseModel
-from service import app, router  # Import the app and router from service.py
+from service import app  
 from fastapi.responses import StreamingResponse
 import asyncio
 import logging
@@ -13,10 +13,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("stt_service")
 
-# The app instance is now defined in service.py and imported here
-# app = FastAPI(title="STT Service - Speech to Text")
 
-# Startup check for required env vars
 if not os.getenv("DEEPGRAM_API_KEY"):
     logger.fatal("[STT] Missing required environment variable: DEEPGRAM_API_KEY")
     sys.exit(1)
@@ -32,7 +29,7 @@ LLM_ONLY = os.getenv("LLM_ONLY", "0") == "1"
 print(f"[STT_SERVICE] TTS_ONLY={TTS_ONLY}, VAD_STT_ONLY={VAD_STT_ONLY}, LLM_ONLY={LLM_ONLY}", flush=True)
 
 class STTRequest(BaseModel):
-    audio_data: str  # base64-encoded audio
+    audio_data: str
 
 class STTResponse(BaseModel):
     transcript: str
@@ -41,9 +38,6 @@ async def verify_internal_api_key(x_internal_api_key: str = Header(...)):
     if x_internal_api_key != INTERNAL_API_KEY:
         logger.error(f"[STT] Invalid or missing internal API key: {x_internal_api_key}")
         raise HTTPException(status_code=403, detail="Forbidden: invalid internal API key")
-
-# Include the router from service.py in the app
-app.include_router(router)
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):

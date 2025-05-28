@@ -145,8 +145,7 @@ async def voice_session_ws(websocket: WebSocket):
                             rms = np.sqrt(np.mean(pcm.astype(np.float32) ** 2)) if pcm.size > 0 else 0
                             try:
                                 speech_detected = is_speech(bytes(vad_chunk))
-                                # logger.info(f"[WS {session_id}] VAD frame: len={len(vad_chunk)}, RMS={rms:.2f}, speech_detected={speech_detected}")  # Commented out to reduce log size
-                                # print(f"[WS {session_id}] VAD frame: len={len(vad_chunk)}, RMS={rms:.2f}, speech_detected={speech_detected}", file=sys.stderr)  # Already commented out
+                                # logger.info(f"[WS {session_id}] VAD frame: speech_detected={speech_detected}, RMS={rms:.2f}")  # Removed to reduce log verbosity
                             except Exception as e:
                                 logger.error(f"[WS {session_id}] VAD error on 960-byte frame: {e}")
                                 await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"VAD error: {e}"})
@@ -162,32 +161,28 @@ async def voice_session_ws(websocket: WebSocket):
                             # --- END BARGE-IN ---
 
                             if speech_detected:
-                                # When speech is detected, start/continue accumulating audio for STT
+                                # Accumulate this VAD chunk for STT
+                                audio_buffer_for_stt.extend(vad_chunk)
                                 silence_counter = 0 # Reset silence counter
                                 if not speaking:
                                     speaking = True
                                     await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": True})
-                                # The audio is already in audio_buffer (the part that was NOT consumed by VAD)
-                                # We will accumulate the audio_buffer after the loop
                             else:
                                 if speaking:
                                     # If previously speaking, count silence
                                     silence_counter += 1
                                     if silence_counter >= max_silence_chunks:
-                                        # End of utterance: process the accumulated audio_buffer
+                                        # End of utterance: process the accumulated audio_buffer_for_stt
                                         speaking = False
                                         await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": False})
-                                        # --- End of utterance: send the accumulated audio_buffer to STT ---
+                                        # --- End of utterance: send the accumulated audio_buffer_for_stt to STT ---
                                         if audio_buffer_for_stt:
                                             audio_b64 = base64.b64encode(audio_buffer_for_stt).decode("utf-8")
                                             stt_payload = {"audio_data": audio_b64}
-                                            # Use streaming STT endpoint for lower latency
                                             logger.info(f"[WS {session_id}] STT request payload: {json.dumps(stt_payload)[:500]}...")
                                             try:
-                                                # Note: This streaming approach might need adjustment to handle the buffered chunks correctly
-                                                # Consider sending the whole audio_buffer_for_stt or refactoring STT streaming
                                                 async def audio_stream():
-                                                    yield base64.b64decode(audio_b64) # This might not work correctly with the accumulated buffer
+                                                    yield base64.b64decode(audio_b64)
                                                 async with client.stream("POST", STT_STREAM_URL, content=audio_stream(), headers={"x-internal-api-key": INTERNAL_API_KEY, "Content-Type": "application/octet-stream"}, timeout=30) as stt_resp:
                                                     logger.info(f"[WS {session_id}] STT response code: {stt_resp.status_code}")
                                                     transcript = ""
@@ -198,7 +193,6 @@ async def voice_session_ws(websocket: WebSocket):
                                                     # --- LLM2 + TTS PIPELINE ---
                                                     if transcript.strip():
                                                         print(f"[ORCH] Forwarding transcript to LLM2 @ {time.time():.3f}: {transcript}")
-                                                        # Call LLM2
                                                         llm2_payload = {
                                                             "user_query": transcript,
                                                             "persona_context": session.get("llm1_context", "You are a helpful AI assistant."),
@@ -232,10 +226,7 @@ async def voice_session_ws(websocket: WebSocket):
                                         # Always send VAD_STATE False when speaking stops
                                         await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": False})
 
-                        # After processing all 960-byte VAD frames, accumulate any remaining audio_buffer for STT if speaking
-                        if speaking:
-                            audio_buffer_for_stt.extend(audio_buffer) # Add the remainder of audio_buffer to stt buffer
-                            audio_buffer = bytearray() # Clear the main audio_buffer after processing
+                        # After processing all 960-byte VAD frames, do NOT accumulate audio_buffer for STT again
     except WebSocketDisconnect:
         logger.info(f"[WS {session_id}] Session disconnected (WebSocketDisconnect)")
         print(f"[WS {session_id}] Session disconnected (WebSocketDisconnect)", file=sys.stderr)
