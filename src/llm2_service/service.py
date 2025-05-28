@@ -6,6 +6,7 @@ from openai import AsyncAzureOpenAI
 import openai, httpx
 import traceback
 import random
+import asyncio
 
 print(f"[DEBUG] openai version: {openai.__version__}")
 print(f"[DEBUG] httpx version: {httpx.__version__}")
@@ -60,49 +61,19 @@ async def generate_response(user_query: str, persona_context: str, rules: dict =
                 "model": model or GPT4O_MINI_DEPLOYMENT,
                 "temperature": 0.7,
                 "top_p": top_p,
+                "stream": True,
             }
             logging.info(f"[LLM2] Outgoing OpenAI params: {params}")
-            response = await client.chat.completions.create(**params)
-            logging.info(f"[LLM2] Azure raw response: {response}")
-            finish_reason = getattr(response.choices[0], 'finish_reason', None) if hasattr(response, 'choices') and response.choices else None
-            reply = response.choices[0].message.content if hasattr(response.choices[0], 'message') else None
-            # Extract token usage for debugging
-            usage = getattr(response, 'usage', None)
-            reasoning_tokens = None
-            accepted_prediction_tokens = None
-            if usage and hasattr(usage, 'completion_tokens_details'):
-                details = usage.completion_tokens_details
-                reasoning_tokens = getattr(details, 'reasoning_tokens', None)
-                accepted_prediction_tokens = getattr(details, 'accepted_prediction_tokens', None)
-            # Extract content filter results for debugging
-            content_filter_results = None
-            if hasattr(response.choices[0], 'content_filter_results'):
-                content_filter_results = response.choices[0].content_filter_results
-            logging.info(f"[LLM2] Reply content: {repr(reply)} | Finish reason: {finish_reason} | Reasoning tokens: {reasoning_tokens} | Accepted prediction tokens: {accepted_prediction_tokens} | Content filter results: {content_filter_results}")
-            if not reply or not reply.strip():
-                logging.error(f"[LLM2] Received empty content from Azure: {response}")
-                # Retry once with lower tokens if not already tried
-                if attempt == 0:
-                    logging.info("[LLM2] Retrying with max_completion_tokens=1024 due to empty response.")
-                    params["max_completion_tokens"] = 1024
-                    response = await client.chat.completions.create(**params)
-                    finish_reason = getattr(response.choices[0], 'finish_reason', None) if hasattr(response, 'choices') and response.choices else None
-                    reply = response.choices[0].message.content if hasattr(response.choices[0], 'message') else None
-                    usage = getattr(response, 'usage', None)
-                    reasoning_tokens = None
-                    accepted_prediction_tokens = None
-                    if usage and hasattr(usage, 'completion_tokens_details'):
-                        details = usage.completion_tokens_details
-                        reasoning_tokens = getattr(details, 'reasoning_tokens', None)
-                        accepted_prediction_tokens = getattr(details, 'accepted_prediction_tokens', None)
-                    content_filter_results = None
-                    if hasattr(response.choices[0], 'content_filter_results'):
-                        content_filter_results = response.choices[0].content_filter_results
-                    logging.info(f"[LLM2] Retry reply content: {repr(reply)} | Finish reason: {finish_reason} | Reasoning tokens: {reasoning_tokens} | Accepted prediction tokens: {accepted_prediction_tokens} | Content filter results: {content_filter_results}")
-                    if reply and reply.strip():
-                        return {"response": reply}
-                return {"response": f"Sorry, the model could not generate a response. This may be due to content filtering, a temporary issue, or the model running out of tokens. Finish reason: {finish_reason}, Reasoning tokens used: {reasoning_tokens}, output tokens: {accepted_prediction_tokens}, content filter results: {content_filter_results}. Please try a different prompt, increase max tokens, or try again later.", "error": "Empty content from Azure OpenAI."}
-            return {"response": reply}
+            start_time = asyncio.get_event_loop().time()
+            response_stream = await client.chat.completions.create(**params)
+            full_reply = ""
+            async for chunk in response_stream:
+                delta = getattr(chunk.choices[0], 'delta', None)
+                if delta and hasattr(delta, 'content') and delta.content:
+                    full_reply += delta.content
+                    logging.info(f"[LLM2] [stream] Partial: {repr(full_reply)} @ {asyncio.get_event_loop().time() - start_time:.3f}s")
+            logging.info(f"[LLM2] [stream] Final: {repr(full_reply)} @ {asyncio.get_event_loop().time() - start_time:.3f}s")
+            return {"response": full_reply}
         except Exception as e:
             err_str = str(e)
             logging.error(f"[LLM2] OpenAI call failed (attempt {attempt+1}/{max_retries}): {e}\n{traceback.format_exc()}")
@@ -112,7 +83,6 @@ async def generate_response(user_query: str, persona_context: str, rules: dict =
                 max_wait = 30
                 wait_time = min(max_wait, base ** attempt + random.uniform(0, 1))
                 logging.warning(f"[LLM2] Rate limit hit (429). Retrying after {wait_time:.2f} seconds... If this persists, consider upgrading your Azure OpenAI quota.")
-                import asyncio
                 await asyncio.sleep(wait_time)
                 if attempt < max_retries - 1:
                     continue
