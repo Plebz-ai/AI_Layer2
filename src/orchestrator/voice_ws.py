@@ -12,6 +12,8 @@ from speech.vad import is_speech
 import sys
 import numpy as np
 import time
+import threading
+import websockets
 
 router = APIRouter()
 logger = logging.getLogger("voice_ws")
@@ -103,127 +105,31 @@ async def voice_session_ws(websocket: WebSocket):
         greeting_text = f"Hello, I am {init_data['characterDetails'].get('name', 'your assistant')}! How can I help you today?"
         await websocket.send_json({"type": MSG_TYPE_GREETING, "text": greeting_text})
         logger.info(f"[WS {session_id}] Sent greeting: {greeting_text}")
-        # 4. Main loop: handle audio, VAD, STT, LLM2, TTS, barge-in, etc.
-        speaking = False
-        silence_counter = 0
-        max_silence_chunks = 10
-        tts_playing = False
-        tts_cancel_event = None
-        history = []
-        audio_buffer = bytearray()
-        audio_buffer_for_stt = bytearray()
-        async with httpx.AsyncClient(timeout=None) as client:
-            while True:
-                try:
+        # --- NEW: Open persistent WebSocket to STT service ---
+        stt_ws_url = "ws://stt_service:8003/ws/stream-speech-to-text"
+        async with websockets.connect(stt_ws_url, max_size=2**24) as stt_ws:
+            async def frontend_to_stt():
+                while True:
                     msg = await websocket.receive()
-                    # print(f"[WS {session_id}] Received message in main loop: {{msg}}", file=sys.stderr)  # Commented out to reduce log size
-                except Exception as e:
-                    logger.error(f"[WS {session_id}] Error receiving message: {e}")
-                    break
-                if msg["type"] == "websocket.disconnect":
-                    logger.info(f"[WS {session_id}] WebSocket disconnected.")
-                    break
-                if msg["type"] == "websocket.receive":
-                    if "bytes" in msg:
+                    if msg["type"] == "websocket.disconnect":
+                        logger.info(f"[WS {session_id}] WebSocket disconnected.")
+                        break
+                    if msg["type"] == "websocket.receive" and "bytes" in msg:
                         audio_chunk = msg["bytes"]
-                        # Dump first DUMP_LIMIT buffers to disk for inspection
-                        if received_buffers[session_id] < DUMP_LIMIT:
-                            dump_path = f"/tmp/audio_dump_{session_id}_{received_buffers[session_id]}.raw"
-                            with open(dump_path, "wb") as f:
-                                f.write(audio_chunk)
-                            logger.info(f"[WS {session_id}] Dumped audio buffer to {dump_path} (len={len(audio_chunk)})")
-                            received_buffers[session_id] += 1
-                        # Append incoming audio to buffer
-                        audio_buffer.extend(audio_chunk)
-
-                        # Process the buffer in 960-byte chunks for VAD
-                        while len(audio_buffer) >= 960:
-                            vad_chunk = audio_buffer[:960]
-                            audio_buffer = audio_buffer[960:] # Keep the rest in buffer
-
-                            pcm = np.frombuffer(vad_chunk, dtype=np.int16)
-                            rms = np.sqrt(np.mean(pcm.astype(np.float32) ** 2)) if pcm.size > 0 else 0
-                            try:
-                                speech_detected = is_speech(bytes(vad_chunk))
-                                # logger.info(f"[WS {session_id}] VAD frame: speech_detected={speech_detected}, RMS={rms:.2f}")  # Removed to reduce log verbosity
-                            except Exception as e:
-                                logger.error(f"[WS {session_id}] VAD error on 960-byte frame: {e}")
-                                await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"VAD error: {e}"})
-                                continue
-
-                            # --- BARGE-IN LOGIC ---
-                            if tts_playing and speech_detected:
-                                tts_playing = False
-                                if tts_cancel_event:
-                                    tts_cancel_event.set()
-                                logger.info(f"[WS {session_id}] Barge-in: user started speaking during TTS.")
-                                await websocket.send_json({"type": MSG_TYPE_BARGE_IN})
-                            # --- END BARGE-IN ---
-
-                            if speech_detected:
-                                # Accumulate this VAD chunk for STT
-                                audio_buffer_for_stt.extend(vad_chunk)
-                                silence_counter = 0 # Reset silence counter
-                                if not speaking:
-                                    speaking = True
-                                    await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": True})
-                            else:
-                                if speaking:
-                                    # If previously speaking, count silence
-                                    silence_counter += 1
-                                    if silence_counter >= max_silence_chunks:
-                                        # End of utterance: process the accumulated audio_buffer_for_stt
-                                        speaking = False
-                                        await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": False})
-                                        # --- End of utterance: send the accumulated audio_buffer_for_stt to STT ---
-                                        if audio_buffer_for_stt:
-                                            audio_b64 = base64.b64encode(audio_buffer_for_stt).decode("utf-8")
-                                            stt_payload = {"audio_data": audio_b64}
-                                            logger.info(f"[WS {session_id}] STT request payload: {json.dumps(stt_payload)[:500]}...")
-                                            try:
-                                                # Always send JSON with base64 audio_data
-                                                stt_headers = {"x-internal-api-key": INTERNAL_API_KEY, "Content-Type": "application/json"}
-                                                stt_resp = await client.post(STT_STREAM_URL, json=stt_payload, headers=stt_headers, timeout=30)
-                                                logger.info(f"[WS {session_id}] STT response code: {stt_resp.status_code}")
-                                                transcript = stt_resp.text
-                                                await websocket.send_json({"type": MSG_TYPE_TRANSCRIPT_FINAL, "text": transcript})
-                                                # --- LLM2 + TTS PIPELINE ---
-                                                if transcript.strip():
-                                                    print(f"[ORCH] Forwarding transcript to LLM2 @ {time.time():.3f}: {transcript}")
-                                                    llm2_payload = {
-                                                        "user_query": transcript,
-                                                        "persona_context": session.get("llm1_context", "You are a helpful AI assistant."),
-                                                        "rules": {},
-                                                        "model": os.getenv("AZURE_GPT4O_MINI_DEPLOYMENT", "gpt-4o-mini")
-                                                    }
-                                                    try:
-                                                        llm2_start = time.time()
-                                                        llm2_resp = await client.post(LLM2_URL, json=llm2_payload, headers={"x-internal-api-key": INTERNAL_API_KEY})
-                                                        llm2_data = llm2_resp.json()
-                                                        ai_text = llm2_data.get("response", "")
-                                                        print(f"[ORCH] LLM2 response @ {time.time():.3f} (latency: {time.time()-llm2_start:.3f}s): {ai_text}")
-                                                        await websocket.send_json({"type": MSG_TYPE_LLM2_FINAL, "text": ai_text})
-                                                        # Call TTS
-                                                        tts_payload = {
-                                                            "text": ai_text,
-                                                            "voice_type": session["character_details"].get("voice_type", "predefined")
-                                                        }
-                                                        async with client.stream("POST", TTS_STREAM_URL, json=tts_payload, headers={"x-internal-api-key": INTERNAL_API_KEY}) as tts_resp:
-                                                            async for tts_chunk in tts_resp.aiter_bytes():
-                                                                await websocket.send_bytes(tts_chunk)
-                                                            await websocket.send_json({"type": MSG_TYPE_TTS_END})
-                                                    except Exception as e:
-                                                        logger.error(f"[WS {session_id}] LLM2 or TTS pipeline error: {e}")
-                                                        await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"LLM2 or TTS pipeline error: {e}"})
-                                            except Exception as e:
-                                                logger.error(f"[WS {session_id}] STT streaming exception: {e}")
-                                                await websocket.send_json({"type": MSG_TYPE_ERROR, "error": f"STT streaming exception: {e}"})
-                                            # Clear the audio buffer for STT after processing
-                                            audio_buffer_for_stt = bytearray()
-                                        # Always send VAD_STATE False when speaking stops
-                                        await websocket.send_json({"type": MSG_TYPE_VAD_STATE, "speaking": False})
-
-                        # After processing all 960-byte VAD frames, do NOT accumulate audio_buffer for STT again
+                        await stt_ws.send(audio_chunk)
+                        logger.info(f"[WS {session_id}] Forwarded {len(audio_chunk)} bytes to STT WS")
+            async def stt_to_frontend():
+                async for stt_msg in stt_ws:
+                    try:
+                        data = json.loads(stt_msg)
+                        if data.get("type") == "transcript":
+                            await websocket.send_json({"type": MSG_TYPE_TRANSCRIPT_FINAL, "text": data["text"]})
+                            logger.info(f"[WS {session_id}] Forwarded transcript to frontend: {data['text']}")
+                        else:
+                            await websocket.send_json(data)
+                    except Exception as e:
+                        logger.error(f"[WS {session_id}] Error parsing STT WS message: {e}")
+            await asyncio.gather(frontend_to_stt(), stt_to_frontend())
     except WebSocketDisconnect:
         logger.info(f"[WS {session_id}] Session disconnected (WebSocketDisconnect)")
         print(f"[WS {session_id}] Session disconnected (WebSocketDisconnect)", file=sys.stderr)

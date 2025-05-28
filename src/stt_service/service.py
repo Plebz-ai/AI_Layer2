@@ -97,6 +97,10 @@ async def deepgram_stream(audio_chunks):
 
 @app.post("/stream-speech-to-text")
 async def stream_speech_to_text(request: Request):
+    """
+    Accepts pre-recorded audio (16kHz 16-bit mono PCM) via HTTP POST for batch transcription.
+    Not for real-time streaming. For real-time, use the WebSocket endpoint /ws/stream-speech-to-text.
+    """
     body = await request.body()
     content_type = request.headers.get("content-type", "")
     logger.info(f"[STT] Incoming /stream-speech-to-text content-type: {content_type}")
@@ -153,49 +157,37 @@ async def websocket_speech_to_text(ws: WebSocket):
     await ws.accept()
     logger.info("[STT WS] Client connected")
     try:
+        # For each client, open a persistent WebSocket to Deepgram
+        url = get_deepgram_url()
+        headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
+        async with websockets.connect(url, additional_headers=headers, max_size=2**24) as dg_ws:
+            async def client_to_deepgram():
+                try:
+                    while True:
+                        data = await ws.receive_bytes()
+                        # Forward raw PCM bytes to Deepgram
+                        await dg_ws.send(data)
+                except WebSocketDisconnect:
+                    logger.info("[STT WS] Client disconnected")
+                    await dg_ws.close()
+                except Exception as e:
+                    logger.error(f"[STT WS] Error receiving from client: {e}")
+                    await dg_ws.close()
 
-        audio_queue = asyncio.Queue()
-        stop_event = asyncio.Event()
+            async def deepgram_to_client():
+                try:
+                    async for msg in dg_ws:
+                        data = json.loads(msg)
+                        if "channel" in data and "alternatives" in data["channel"]:
+                            alt = data["channel"]["alternatives"][0]
+                            transcript = alt.get("transcript", "")
+                            if transcript:
+                                await ws.send_json({"type": "transcript", "text": transcript})
+                except Exception as e:
+                    logger.error(f"[STT WS] Error receiving from Deepgram: {e}")
+                    await ws.send_json({"type": "error", "error": "Deepgram connection failed."})
 
-        async def audio_receiver():
-            try:
-                while not stop_event.is_set():
-                    data = await ws.receive_bytes()
-                    await audio_queue.put(data)
-            except WebSocketDisconnect:
-                logger.info("[STT WS] Client disconnected")
-                stop_event.set()
-            except Exception as e:
-                logger.error(f"[STT WS] Receiver error: {e}")
-                stop_event.set()
-
-        async def deepgram_sender():
-            url = get_deepgram_url()
-            headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
-            try:
-                async with websockets.connect(url, additional_headers=headers, max_size=2**24) as dg_ws:
-                    async def sender():
-                        while not stop_event.is_set():
-                            chunk = await audio_queue.get()
-                            await dg_ws.send(chunk)
-                        await dg_ws.send(b"")
-                    async def receiver():
-                        async for msg in dg_ws:
-                            data = json.loads(msg)
-                            if "channel" in data and "alternatives" in data["channel"]:
-                                alt = data["channel"]["alternatives"][0]
-                                transcript = alt.get("transcript", "")
-                                if transcript:
-                                    await ws.send_text(transcript)
-                    sender_task = asyncio.create_task(sender())
-                    await receiver()
-                    await sender_task
-            except Exception as e:
-                logger.error(f"[STT WS] Deepgram error: {e}")
-                await ws.send_text("[ERROR] Deepgram connection failed.")
-                stop_event.set()
-
-        await asyncio.gather(audio_receiver(), deepgram_sender())
+            await asyncio.gather(client_to_deepgram(), deepgram_to_client())
     except Exception as e:
         logger.error(f"[STT WS] Unexpected error: {e}")
     finally:
