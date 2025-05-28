@@ -61,10 +61,7 @@ class OrchestratorResponse(BaseModel):
     response: str
     audio_data: Optional[str] = None
 
-DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-if not DEEPGRAM_API_KEY:
-    print("[ORCHESTRATOR] WARNING: DEEPGRAM_API_KEY not set!", flush=True)
 if not ELEVENLABS_API_KEY:
     print("[ORCHESTRATOR] WARNING: ELEVENLABS_API_KEY not set!", flush=True)
 
