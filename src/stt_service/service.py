@@ -21,6 +21,8 @@ if not DEEPGRAM_API_KEY:
 
 DEEPGRAM_URL = "wss://api.deepgram.com/v1/listen"
 
+print("websockets version:", websockets.__version__)
+
 @router.get("/health")
 async def health_check():
     return {"status": "ok"}
