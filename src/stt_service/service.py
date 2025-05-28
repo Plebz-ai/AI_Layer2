@@ -105,6 +105,21 @@ async def stream_speech_to_text(request: Request):
     except Exception:
         audio_data = body
 
+    # Audio format validation and logging
+    logger.info(f"[STT] First 32 bytes of audio: {audio_data[:32]}")
+    if len(audio_data) % 2 != 0:
+        logger.warning("[STT] Audio length is not a multiple of 2 (not valid 16-bit PCM)")
+    import array
+    pcm = array.array('h')
+    try:
+        pcm.frombytes(audio_data[:min(3200, len(audio_data))])
+        if all(x == 0 for x in pcm):
+            logger.warning("[STT] Audio chunk is all zeros (silence or bad format)")
+        if all(x == 32767 or x == -32768 for x in pcm):
+            logger.warning("[STT] Audio chunk is all max/min values (bad format)")
+    except Exception as e:
+        logger.warning(f"[STT] Could not parse audio chunk as 16-bit PCM: {e}")
+
     # Call Deepgram HTTP API
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -120,6 +135,9 @@ async def stream_speech_to_text(request: Request):
                 "punctuate": "true"
             }
         )
+        if response.status_code != 200:
+            logger.error(f"Deepgram HTTP error {response.status_code}: {response.text}")
+            return Response(content=response.text, status_code=response.status_code, media_type="application/json")
         return Response(content=response.content, media_type="application/json")
 
 @app.websocket("/ws/stream-speech-to-text")
